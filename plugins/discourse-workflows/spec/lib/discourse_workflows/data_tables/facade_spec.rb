@@ -450,16 +450,11 @@ RSpec.describe DiscourseWorkflows::DataTables::Facade do
       expect(result[:rows].map { |r| r["id"] }).to eq([all_ids[1]])
     end
 
-    it "caps limit at MAX_LIMIT" do
-      result = facade.query(build_query(limit: 999))
-
-      expect(result[:rows].size).to be <= described_class::MAX_LIMIT
-    end
-
-    it "ignores zero limit" do
-      result = facade.query(build_query(limit: 0))
-
-      expect(result[:rows].size).to eq(4)
+    it "caps an oversized limit at MAX_LIMIT and treats zero as no limit" do
+      stub_const(described_class, :MAX_LIMIT, 2) do
+        expect(facade.query(build_query(limit: 999))[:rows].size).to eq(2)
+        expect(facade.query(build_query(limit: 0))[:rows].size).to eq(4)
+      end
     end
 
     it "ignores zero offset" do
@@ -536,7 +531,7 @@ RSpec.describe DiscourseWorkflows::DataTables::Facade do
 
   describe "#update" do
     it "updates matching rows and returns the affected count" do
-      updated_count =
+      count =
         facade.update(
           query:
             build_query(
@@ -550,8 +545,20 @@ RSpec.describe DiscourseWorkflows::DataTables::Facade do
           row_input: facade.build_row_input(data: { "score" => 99 }),
         )
 
-      expect(updated_count).to eq(1)
+      expect(count).to eq(1)
       expect(find_data_table_row(data_table, row_1["id"])["score"]).to eq(99)
+    end
+
+    it "returns capped rows ordered by id with the total count when asked for rows" do
+      result =
+        facade.update(
+          query: build_query(limit: 2),
+          row_input: facade.build_row_input(data: { "score" => 1 }),
+          returning: :rows,
+        )
+
+      expect(result[:count]).to eq(4)
+      expect(result[:rows].map { |row| row["id"] }).to eq([row_1["id"], row_2["id"]])
     end
   end
 
@@ -561,11 +568,8 @@ RSpec.describe DiscourseWorkflows::DataTables::Facade do
       expect(find_data_table_row(data_table, row_1["id"])).to be_nil
     end
 
-    it "returns 0 for non-existent ids" do
+    it "returns 0 for non-existent or no ids" do
       expect(facade.delete_rows([-1])).to eq(0)
-    end
-
-    it "returns 0 for an empty array" do
       expect(facade.delete_rows([])).to eq(0)
     end
 
@@ -578,41 +582,26 @@ RSpec.describe DiscourseWorkflows::DataTables::Facade do
   end
 
   describe "#delete" do
-    it "deletes matching rows and returns the affected count" do
-      deleted_count =
-        facade.delete(
-          query:
-            build_query(
-              filter: {
-                "type" => "and",
-                "filters" => [
-                  { "columnName" => "email", "condition" => "eq", "value" => "bob@example.com" },
-                ],
-              },
-            ),
-        )
+    let(:bob_query) do
+      build_query(
+        filter: {
+          "type" => "and",
+          "filters" => [
+            { "columnName" => "email", "condition" => "eq", "value" => "bob@example.com" },
+          ],
+        },
+      )
+    end
 
-      expect(deleted_count).to eq(1)
+    it "deletes matching rows and returns the affected count" do
+      expect(facade.delete(query: bob_query)).to eq(1)
       expect(find_data_table_row(data_table, row_2["id"])).to be_nil
     end
 
     it "deletes matching rows when storage is over the limit" do
       allow(described_class).to receive(:within_storage_limit?).and_return(false)
 
-      deleted_count =
-        facade.delete(
-          query:
-            build_query(
-              filter: {
-                "type" => "and",
-                "filters" => [
-                  { "columnName" => "email", "condition" => "eq", "value" => "bob@example.com" },
-                ],
-              },
-            ),
-        )
-
-      expect(deleted_count).to eq(1)
+      expect(facade.delete(query: bob_query)).to eq(1)
       expect(find_data_table_row(data_table, row_2["id"])).to be_nil
     end
   end
