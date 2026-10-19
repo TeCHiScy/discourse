@@ -363,11 +363,11 @@ class AiAgent < ActiveRecord::Base
             klass = DiscourseAi::Agents::Tools::Custom.class_instance(custom_tool_id)
           end
         else
-          inner_name = inner_name.gsub("Tool", "")
-          inner_name = "List#{inner_name}" if %w[Categories Tags Users].include?(inner_name)
+          builtin_name = inner_name.gsub("Tool", "")
+          builtin_name = "List#{builtin_name}" if %w[Categories Tags Users].include?(builtin_name)
 
           klass =
-            "DiscourseAi::Agents::Tools::#{inner_name}".safe_constantize ||
+            "DiscourseAi::Agents::Tools::#{builtin_name}".safe_constantize ||
               DiscourseAi::Agents::Agent.external_tool_by_name(inner_name)
           options[klass] = current_options if klass && current_options
         end
@@ -631,7 +631,7 @@ class AiAgent < ActiveRecord::Base
         )
         tool_class =
           "DiscourseAi::Agents::Tools::#{normalized_name}".safe_constantize ||
-            DiscourseAi::Agents::Agent.external_tool_by_name(normalized_name)
+            DiscourseAi::Agents::Agent.external_tool_by_name(tool_name.to_s)
         tool_class&.signature&.[](:name)
       end
     end
