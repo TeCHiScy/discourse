@@ -1,0 +1,3 @@
+en:
+  discourse_discuz_legacy_auth:
+    password_reset_required: "Your Discuz password is correct, but it does not meet this site's password rules (%{password_error}). Use Forgot Password to set a compliant password."

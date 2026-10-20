@@ -174,11 +174,23 @@ class DiscuzImportVerifier
     active_placeholder_count = User.where(id: placeholder_target_ids, active: true).count
     expected_duplicate_emails = source[:duplicate_email_uids]
     imported_duplicate_emails = flagged_source_user_ids("discuz_duplicate_email", user_imports)
+    email_conflict_remaps = flagged_source_user_ids("discuz_email_conflict", user_imports)
+    email_confirmation_report =
+      verify_email_confirmation(
+        source,
+        user_imports,
+        expected_duplicate_emails,
+        email_conflict_remaps,
+      )
+    provenance_report = verify_discuz_provenance(user_imports)
+    site_setup_report = verify_site_setup(category_imports)
 
     category_comparison = compare_ids(source[:category_ids], category_imports.keys.to_set)
     category_content_report = verify_categories(source, category_imports)
     password_report = verify_legacy_password_fields(source, user_imports)
     sample_source_integrity = verify_sample_source_integrity(source)
+      if stage == :acceptance
+      end
     content_reports =
       if stage == :acceptance
         [
@@ -197,6 +209,10 @@ class DiscuzImportVerifier
       active_placeholder_count,
       compare_ids(expected_duplicate_emails, imported_duplicate_emails)[:missing_count],
       compare_ids(expected_duplicate_emails, imported_duplicate_emails)[:unexpected_count],
+      provenance_report[:mismatch_count],
+      provenance_report[:unexpected_tagged_account_count],
+      email_confirmation_report[:failure_count],
+      site_setup_report[:failure_count],
       category_comparison[:missing_count],
       category_comparison[:unexpected_count],
       category_duplicate_values.length,
@@ -205,9 +221,10 @@ class DiscuzImportVerifier
       category_content_report[:read_restriction_mismatches],
       category_content_report[:permission_mismatches],
       category_content_report[:access_metadata_mismatches],
-      password_report[:missing_hash_or_salt_count],
+      password_report[:failure_count],
       sample_source_integrity[:mismatch_count],
     ]
+    core_failures.compact!
     if post_report && pm_report
       core_failures.concat([post_report[:failure_count], pm_report[:failure_count]])
     end
@@ -243,8 +260,12 @@ class DiscuzImportVerifier
         expected_duplicate_email_remaps: expected_duplicate_emails.length,
         duplicate_email_flag_comparison:
           compare_ids(expected_duplicate_emails, imported_duplicate_emails),
+        target_email_conflict_remap_count: email_conflict_remaps.length,
+        email_confirmation: email_confirmation_report,
+        provenance: provenance_report,
         legacy_auth: password_report,
       },
+      site_setup: site_setup_report,
       categories: {
         imported_id_count: category_imports.length,
         id_comparison: category_comparison,
@@ -283,6 +304,16 @@ class DiscuzImportVerifier
     active_placeholder_count = User.where(id: placeholder_target_ids, active: true).count
     expected_duplicate_emails = source[:duplicate_email_uids]
     imported_duplicate_emails = flagged_source_user_ids("discuz_duplicate_email", user_imports)
+    email_conflict_remaps = flagged_source_user_ids("discuz_email_conflict", user_imports)
+    email_confirmation_report =
+      verify_email_confirmation(
+        source,
+        user_imports,
+        expected_duplicate_emails,
+        email_conflict_remaps,
+      )
+    provenance_report = verify_discuz_provenance(user_imports)
+    site_setup_report = verify_site_setup(category_imports)
 
     category_comparison = compare_ids(source[:category_ids], category_imports.keys.to_set)
     category_content_report = verify_categories(source, category_imports)
@@ -299,6 +330,10 @@ class DiscuzImportVerifier
       active_placeholder_count,
       compare_ids(expected_duplicate_emails, imported_duplicate_emails)[:missing_count],
       compare_ids(expected_duplicate_emails, imported_duplicate_emails)[:unexpected_count],
+      provenance_report[:mismatch_count],
+      provenance_report[:unexpected_tagged_account_count],
+      email_confirmation_report[:failure_count],
+      site_setup_report[:failure_count],
       category_comparison[:missing_count],
       category_comparison[:unexpected_count],
       category_duplicate_values.length,
@@ -309,7 +344,7 @@ class DiscuzImportVerifier
       category_content_report[:access_metadata_mismatches],
       post_report[:failure_count],
       pm_report[:failure_count],
-      password_report[:missing_hash_or_salt_count],
+      password_report[:failure_count],
     ]
 
     {
@@ -325,8 +360,12 @@ class DiscuzImportVerifier
         expected_duplicate_email_remaps: expected_duplicate_emails.length,
         duplicate_email_flag_comparison:
           compare_ids(expected_duplicate_emails, imported_duplicate_emails),
+        target_email_conflict_remap_count: email_conflict_remaps.length,
+        email_confirmation: email_confirmation_report,
+        provenance: provenance_report,
         legacy_auth: password_report,
       },
+      site_setup: site_setup_report,
       categories: {
         imported_id_count: category_imports.length,
         id_comparison: category_comparison,
@@ -368,7 +407,10 @@ class DiscuzImportVerifier
 
   def load_source_data
     member_filter = " WHERE uid IN (#{sample_id_sql("member_uids")})" if @sample_manifest
-    members = rows("SELECT uid, email FROM (#{member_union}) members#{member_filter} ORDER BY uid")
+    members =
+      rows(
+        "SELECT uid, email, emailstatus FROM (#{member_union}) members#{member_filter} ORDER BY uid",
+      )
     member_ids = members.map { |row| row["uid"].to_s }.to_set
     references = @sample_manifest ? sample_referenced_uid_union : referenced_uid_union
     reference_ids = rows(<<~SQL).map { |row| row["uid"].to_s }.to_set
@@ -376,16 +418,18 @@ class DiscuzImportVerifier
         FROM (#{references}) refs
        WHERE refs.uid IS NOT NULL
     SQL
+    member_email_key = source_email_comparison_sql("members.email")
+    candidate_email_key = source_email_comparison_sql("candidates.email")
     duplicate_email_uids = rows(<<~SQL).map { |row| row["uid"].to_s }.to_set
       SELECT members.uid
         FROM (#{member_union}) members
         JOIN (
-          SELECT LOWER(TRIM(email)) email_key, MIN(uid) retained_uid
+          SELECT #{candidate_email_key} email_key, MIN(uid) retained_uid
             FROM (#{member_union}) candidates
            WHERE email IS NOT NULL AND TRIM(email) <> ''
-           GROUP BY LOWER(TRIM(email))
+           GROUP BY email_key
           HAVING COUNT(DISTINCT uid) > 1
-        ) duplicates ON LOWER(TRIM(members.email)) = duplicates.email_key
+        ) duplicates ON #{member_email_key} = duplicates.email_key
        WHERE members.uid <> duplicates.retained_uid
     SQL
     duplicate_email_uids &= member_ids if @sample_manifest
@@ -1143,33 +1187,103 @@ class DiscuzImportVerifier
   end
 
   def verify_legacy_password_fields(_source, user_imports)
-    sample_filter = " AND members.uid IN (#{sample_id_sql("member_uids")})" if @sample_manifest
-    expected_uids = rows(<<~SQL).map { |row| row["uid"].to_s }.to_set
-      SELECT members.uid
+    sample_filter = "WHERE members.uid IN (#{sample_id_sql("member_uids")})" if @sample_manifest
+    source_types = rows(<<~SQL).to_h { |row| [row["uid"].to_s, row["hash_type"]] }
+      SELECT members.uid,
+             CASE
+               WHEN COALESCE(uc.password, '') = '' THEN 'no_legacy_password'
+               WHEN COALESCE(uc.salt, '') = ''
+                    AND LENGTH(uc.password) = 60
+                    AND LEFT(uc.password, 4) IN (
+                      CONCAT(CHAR(36), '2y', CHAR(36)),
+                      CONCAT(CHAR(36), '2a', CHAR(36)),
+                      CONCAT(CHAR(36), '2b', CHAR(36))
+                    ) THEN 'bcrypt'
+               WHEN LENGTH(uc.salt) = 6
+                    AND uc.password REGEXP '^[A-Fa-f0-9]{32}$' THEN 'md5_salt6'
+               ELSE 'unsupported'
+             END hash_type
         FROM (#{member_union}) members
-        JOIN #{uc("members")} uc ON uc.uid = members.uid
-       WHERE COALESCE(uc.password, '') <> '' AND COALESCE(uc.salt, '') <> ''
+        LEFT JOIN #{uc("members")} uc ON uc.uid = members.uid
        #{sample_filter}
     SQL
-    target_user_ids = expected_uids.filter_map { |uid| user_imports[uid] }
-    stored =
-      UserCustomField
-        .where(user_id: target_user_ids, name: %w[discuz_password_hash discuz_password_salt])
-        .pluck(:user_id, :name)
-        .group_by(&:first)
-        .transform_values { |fields| fields.map(&:last).to_set }
-    missing =
-      target_user_ids.count do |user_id|
-        !%w[discuz_password_hash discuz_password_salt].all? do |name|
-          stored[user_id]&.include?(name)
+    target_types = {}
+    native_password_user_ids = Set.new
+    user_imports.each_slice(500) do |batch|
+      target_ids = batch.map(&:last)
+      next if target_ids.empty?
+
+      target_rows = ActiveRecord::Base.connection.select_all(<<~SQL).to_a
+        SELECT user_id,
+               CASE
+                 WHEN COALESCE(hash_value, '') = '' THEN 'no_legacy_password'
+                 WHEN COALESCE(salt_value, '') = ''
+                      AND LENGTH(hash_value) = 60
+                      AND LEFT(hash_value, 4) IN (
+                        chr(36) || '2y' || chr(36),
+                        chr(36) || '2a' || chr(36),
+                        chr(36) || '2b' || chr(36)
+                      ) THEN 'bcrypt'
+                 WHEN LENGTH(salt_value) = 6
+                      AND hash_value ~ '^[A-Fa-f0-9]{32}$' THEN 'md5_salt6'
+                 ELSE 'unsupported'
+               END hash_type
+          FROM (
+            SELECT user_id,
+                   MAX(value) FILTER (WHERE name = 'discuz_password_hash') hash_value,
+                   MAX(value) FILTER (WHERE name = 'discuz_password_salt') salt_value
+              FROM user_custom_fields
+             WHERE user_id IN (#{target_ids.join(",")})
+               AND name IN ('discuz_password_hash', 'discuz_password_salt')
+             GROUP BY user_id
+          ) credentials
+      SQL
+      target_types.merge!(target_rows.to_h { |row| [row["user_id"], row["hash_type"]] })
+      native_password_user_ids.merge(UserPassword.where(user_id: target_ids).pluck(:user_id))
+      target_ids.each { |target_id| target_types[target_id] ||= "no_legacy_password" }
+    end
+
+    mapped_source_types =
+      source_types
+        .filter_map do |uid, source_type|
+          target_id = user_imports[uid]
+          next unless target_id
+
+          target_type = target_types[target_id]
+          if %w[bcrypt md5_salt6].include?(source_type) && target_type == "no_legacy_password" &&
+               native_password_user_ids.include?(target_id)
+            target_type = "discuz_password_upgraded"
+          end
+          [uid, target_type]
         end
+        .to_h
+    hash_type_mismatch_count =
+      source_types.count do |uid, hash_type|
+        user_imports.key?(uid) && mapped_source_types[uid] != "discuz_password_upgraded" &&
+          mapped_source_types[uid] != hash_type
       end
+    unsupported_source_hash_count = source_types.count { |_uid, type| type == "unsupported" }
+    missing_hash_or_salt_count =
+      source_types.count do |uid, type|
+        %w[bcrypt md5_salt6].include?(type) &&
+          (!user_imports[uid] || !mapped_source_types.key?(uid))
+      end
+    source_type_counts = source_types.values.tally.sort.to_h
+    imported_type_counts = mapped_source_types.values.tally.sort.to_h
+    failure_count =
+      hash_type_mismatch_count + unsupported_source_hash_count + missing_hash_or_salt_count
 
     {
-      source_accounts_with_hash_and_salt: expected_uids.length,
-      mapped_accounts_with_hash_and_salt: target_user_ids.length,
-      missing_hash_or_salt_count: missing + (expected_uids - user_imports.keys.to_set).length,
-      verification: "field presence only; secret values are never selected or printed",
+      source_accounts_by_hash_type: source_type_counts,
+      imported_accounts_by_hash_type: imported_type_counts,
+      legacy_password_upgraded_count:
+        mapped_source_types.values.count { |type| type == "discuz_password_upgraded" },
+      hash_type_mismatch_count: hash_type_mismatch_count,
+      unsupported_source_hash_count: unsupported_source_hash_count,
+      missing_hash_or_salt_count: missing_hash_or_salt_count,
+      failure_count: failure_count,
+      verification:
+        "hashes and salts are classified in SQL; successfully upgraded Discourse passwords are accepted",
     }
   end
 
@@ -1179,6 +1293,206 @@ class DiscuzImportVerifier
     mapping = grouped.transform_values { |entries| entries.first.last }
     duplicate_values = grouped.select { |_value, entries| entries.length > 1 }.keys.to_set
     [mapping, duplicate_values]
+  end
+
+  def verify_discuz_provenance(user_imports)
+    expected_source_by_user = user_imports.invert
+    fields =
+      UserCustomField.where(name: %w[discuz_source discuz_uid]).pluck(:user_id, :name, :value)
+    source_by_user =
+      fields
+        .filter { |_user_id, name, _value| name == "discuz_source" }
+        .to_h { |user_id, _name, value| [user_id, value] }
+    uid_by_user =
+      fields
+        .filter { |_user_id, name, _value| name == "discuz_uid" }
+        .to_h { |user_id, _name, value| [user_id, value] }
+
+    mismatch_count =
+      expected_source_by_user.count do |user_id, source_uid|
+        source_by_user[user_id] != "discuz_x3.5" || uid_by_user[user_id].to_s != source_uid.to_s
+      end
+    expected_user_ids = expected_source_by_user.keys.to_set
+    unexpected_tagged_account_count =
+      (
+        source_by_user.select { |_user_id, source| source == "discuz_x3.5" }.keys.to_set -
+          expected_user_ids
+      ).length
+
+    {
+      expected_tagged_account_count: expected_source_by_user.length,
+      matching_tagged_account_count: expected_source_by_user.length - mismatch_count,
+      mismatch_count: mismatch_count,
+      unexpected_tagged_account_count: unexpected_tagged_account_count,
+    }
+  end
+
+  def verify_email_confirmation(source, user_imports, duplicate_email_uids, email_conflict_uids)
+    target_users = {}
+    user_imports
+      .values
+      .uniq
+      .each_slice(500) do |target_ids|
+        User
+          .where(id: target_ids)
+          .includes(:email_tokens, :single_sign_on_record)
+          .each do |user|
+            email_tokens = user.email_tokens.to_a
+            email_confirmed =
+              !!(
+                email_tokens.any? { |token| token.email == user.email && token.confirmed } ||
+                  email_tokens.empty? ||
+                  user.single_sign_on_record&.external_email&.downcase == user.email
+              )
+            target_users[user.id] = {
+              email: user.email,
+              email_confirmed: email_confirmed,
+              active: user.active?,
+            }
+          end
+      end
+
+    expected_confirmed_uids = Set.new
+    source_confirmed_email_mismatch_count = 0
+    source[:members].each do |row|
+      next unless row["emailstatus"].to_s.to_i == 1
+
+      uid = row["uid"].to_s
+      next if duplicate_email_uids.include?(uid) || email_conflict_uids.include?(uid)
+
+      source_email = row["email"].to_s.strip
+      next unless EmailAddressValidator.valid_value?(source_email)
+
+      target_user = target_users[user_imports[uid]]
+      if target_user && target_user[:email] == source_email.downcase
+        expected_confirmed_uids.add(uid)
+      else
+        source_confirmed_email_mismatch_count += 1
+      end
+    end
+
+    inactive_source_member_count =
+      source[:member_ids].count do |uid|
+        target_user = target_users[user_imports[uid]]
+        target_user && !target_user[:active]
+      end
+
+    confirmation_mismatch_count =
+      user_imports.count do |uid, target_id|
+        target_user = target_users[target_id]
+        expected_confirmed = expected_confirmed_uids.include?(uid)
+        !target_user || target_user[:email_confirmed] != expected_confirmed
+      end
+
+    {
+      source_confirmed_mappable_count: expected_confirmed_uids.length,
+      source_confirmed_email_mismatch_count: source_confirmed_email_mismatch_count,
+      target_confirmed_imported_count: target_users.values.count { |user| user[:email_confirmed] },
+      source_member_active_count:
+        source[:member_ids].count { |uid| target_users[user_imports[uid]]&.[](:active) },
+      inactive_source_member_count: inactive_source_member_count,
+      confirmation_mismatch_count: confirmation_mismatch_count,
+      failure_count:
+        source_confirmed_email_mismatch_count + confirmation_mismatch_count +
+          inactive_source_member_count,
+      comparison:
+        "Source emailstatus is compared with Discourse User#email_confirmed?; " \
+          "every imported Discuz member must remain active; duplicate and conflict remaps remain unconfirmed",
+    }
+  end
+
+  def verify_site_setup(category_imports)
+    seed_topic_settings = %w[guidelines_topic_id welcome_topic_id admin_quick_start_topic_id]
+    remaining_seed_topics =
+      seed_topic_settings.filter do |setting_name|
+        topic_id = SiteSetting.get(setting_name).to_i
+        next false unless topic_id.positive?
+
+        topic = Topic.find_by(id: topic_id)
+        topic && topic.deleted_at.blank?
+      end
+    locale_matches = SiteSetting.default_locale == "zh_CN"
+    unicode_usernames_enabled = SiteSetting.unicode_usernames
+    imported_category_ids = category_imports.values.to_set
+    general_setting_id = SiteSetting.general_category_id.to_i
+    general_candidate_ids = Category.where(slug: "general").pluck(:id).to_set
+    general_candidate_ids.add(general_setting_id) if general_setting_id.positive?
+    unimported_general_categories =
+      Category
+        .where(id: general_candidate_ids.to_a)
+        .where.not(id: imported_category_ids.to_a)
+        .order(:id)
+        .pluck(:id, :name, :slug, :topic_count)
+        .map do |id, name, slug, topic_count|
+          { id: id, name: name, slug: slug, topic_count: topic_count }
+        end
+    missing_general_setting_target =
+      general_setting_id.positive? && !Category.exists?(id: general_setting_id)
+    retained_system_category_settings =
+      %w[uncategorized_category_id meta_category_id staff_category_id].to_h do |setting_name|
+        category_id = SiteSetting.get(setting_name).to_i
+        category = Category.find_by(id: category_id) if category_id.positive?
+        [setting_name, { id: category_id, name: category&.name }]
+      end
+    default_composer_category_id = SiteSetting.default_composer_category.to_s
+    missing_default_composer_category =
+      default_composer_category_id.present? && default_composer_category_id.match?(/\A\d+\z/) &&
+        !Category.exists?(id: default_composer_category_id.to_i)
+    default_navigation_category_ids =
+      SiteSetting
+        .default_navigation_menu_categories
+        .split("|")
+        .filter_map { |id| id.to_i if id.match?(/\A\d+\z/) }
+        .uniq
+    missing_default_navigation_category_ids =
+      default_navigation_category_ids -
+        Category.where(id: default_navigation_category_ids).pluck(:id)
+    default_navigation_category_set = default_navigation_category_ids.to_set
+    missing_imported_sidebar_category_ids = imported_category_ids - default_navigation_category_set
+    unexpected_sidebar_category_ids = default_navigation_category_set - imported_category_ids
+    default_sidebar_categories_match_imports =
+      missing_imported_sidebar_category_ids.empty? && unexpected_sidebar_category_ids.empty?
+    failure_count =
+      (locale_matches ? 0 : 1) + (unicode_usernames_enabled ? 0 : 1) +
+        remaining_seed_topics.length + unimported_general_categories.length +
+        (missing_general_setting_target ? 1 : 0) + (missing_default_composer_category ? 1 : 0) +
+        missing_default_navigation_category_ids.length +
+        (default_sidebar_categories_match_imports ? 0 : 1)
+
+    {
+      default_locale: SiteSetting.default_locale,
+      expected_default_locale: "zh_CN",
+      locale_matches: locale_matches,
+      unicode_usernames_enabled: unicode_usernames_enabled,
+      expected_unicode_usernames_enabled: true,
+      remaining_default_seed_topics: remaining_seed_topics,
+      retained_system_category_settings: retained_system_category_settings,
+      unimported_general_categories: unimported_general_categories,
+      general_category_setting_id: general_setting_id,
+      default_composer_category_id: default_composer_category_id,
+      missing_general_setting_target: missing_general_setting_target,
+      missing_default_composer_category: missing_default_composer_category,
+      default_navigation_category_ids: default_navigation_category_ids,
+      missing_default_navigation_category_ids: missing_default_navigation_category_ids,
+      missing_imported_sidebar_category_ids: missing_imported_sidebar_category_ids.to_a.sort,
+      unexpected_sidebar_category_ids: unexpected_sidebar_category_ids.to_a.sort,
+      default_sidebar_categories_match_imports: default_sidebar_categories_match_imports,
+      general_category_cleanup_policy:
+        "remove only an untouched, unimported General seed category with no active topics or children; preserve edited, imported, or content-bearing categories",
+      failure_count: failure_count,
+    }
+  end
+
+  def source_email_comparison_sql(expression)
+    return "LOWER(TRIM(#{expression}))" unless SiteSetting.normalize_emails?
+
+    <<~SQL.squish
+      LOWER(CONCAT(
+        REPLACE(SUBSTRING_INDEX(SUBSTRING_INDEX(TRIM(#{expression}), '@', 1), '+', 1), '.', ''),
+        '@',
+        SUBSTRING_INDEX(TRIM(#{expression}), '@', -1)
+      ))
+    SQL
   end
 
   def imported_post_rows
@@ -1255,9 +1569,9 @@ class DiscuzImportVerifier
     archived = bbs("common_member_archive")
 
     <<~SQL
-      SELECT uid, email, avatarstatus FROM #{active}
+      SELECT uid, email, emailstatus, avatarstatus FROM #{active}
       UNION ALL
-      SELECT archived.uid, archived.email, archived.avatarstatus
+      SELECT archived.uid, archived.email, archived.emailstatus, archived.avatarstatus
         FROM #{archived} archived
        WHERE NOT EXISTS (SELECT 1 FROM #{active} active WHERE active.uid = archived.uid)
     SQL

@@ -181,6 +181,7 @@ class ImportScripts::DiscuzX < ImportScripts::Base
       ].to_i
       puts "Attachment import deferred until a local read-only attachment snapshot is available"
     end
+    prepare_site_for_discuz_import!
     report_source_skips
   end
 
@@ -698,7 +699,7 @@ class ImportScripts::DiscuzX < ImportScripts::Base
       ]
 
     batches(BATCH_SIZE) do |offset|
-      results = mysql_query(<<~SQL)
+      results = mysql_query(<<~SQL).to_a
             SELECT u.uid id, u.username username, u.email email, u.groupid group_id,
                    su.regdate regdate, su.password password_hash, su.salt salt,
                    COALESCE(s.regip, sa.regip) regip,
@@ -742,16 +743,34 @@ class ImportScripts::DiscuzX < ImportScripts::Base
 
       break if results.size < 1
 
+      activation_rows =
+        results.map do |user|
+          {
+            uid: user["id"].to_i,
+            email: user["email"].to_s,
+            email_confirmed: user["email_confirmed"].to_s.to_i == 1,
+          }
+        end
+      target_email_conflicts = target_email_conflict_keys(results.map { |user| user["email"] })
       create_users(results, total: total_count, offset: offset) do |user|
         uid = user["id"].to_i
         duplicated_email = @duplicate_email_uids.include?(uid)
-        email = duplicated_email ? "discuz-uid-#{uid}@users.invalid" : user["email"]
+        source_email = user["email"].to_s.strip
+        email_key = normalized_discuz_email(source_email)
+        email_conflict =
+          !duplicated_email && email_key.present? && target_email_conflicts.include?(email_key)
+        email = duplicated_email || email_conflict ? reserved_discuz_email(uid) : source_email
         custom_fields = {}
         custom_fields["discuz_duplicate_email"] = true if duplicated_email
+        custom_fields["discuz_email_conflict"] = true if email_conflict
+        custom_fields["discuz_original_email"] = source_email if (
+          duplicated_email || email_conflict
+        ) && source_email.present?
 
         {
           id: uid,
           email: email,
+          discuz_email_confirmed: user["email_confirmed"].to_s.to_i == 1,
           username: user["username"],
           name: first_exists(user["realname"], user["customstatus"], user["username"]),
           discuz_password_hash: user["password_hash"],
@@ -901,6 +920,7 @@ class ImportScripts::DiscuzX < ImportScripts::Base
             end,
         }
       end
+      reconcile_discuz_user_activation!(activation_rows)
     end
   end
 
@@ -911,18 +931,134 @@ class ImportScripts::DiscuzX < ImportScripts::Base
   end
 
   def create_user(opts, import_id)
+    opts = opts.dup
+    opts[:custom_fields] = (opts[:custom_fields] || {}).dup
+    opts[:custom_fields]["discuz_source"] = DISCUZ_SOURCE
+    opts[:custom_fields]["discuz_uid"] = import_id.to_s
+    confirm_discuz_email = opts.delete(:discuz_email_confirmed) == true
+    source_email = opts[:email].to_s.strip
     password_hash = opts.delete(:discuz_password_hash)
     password_salt = opts.delete(:discuz_password_salt)
-    user = super
-    return user unless user&.persisted?
+    User.transaction do
+      user = super(opts, import_id)
+      next user unless user&.persisted?
 
-    user.custom_fields["discuz_password_hash"] = password_hash if password_hash.present?
-    user.custom_fields["discuz_password_salt"] = password_salt if password_salt.present?
-    user.save_custom_fields if password_hash.present? || password_salt.present?
-    user
+      unless user.custom_fields["discuz_source"] == DISCUZ_SOURCE &&
+               user.custom_fields["discuz_uid"].to_s == import_id.to_s
+        raise "refusing to attach Discuz identity to an existing unmarked account for UID #{import_id}"
+      end
+
+      user.custom_fields["discuz_password_hash"] = password_hash if password_hash.present?
+      user.custom_fields["discuz_password_salt"] = password_salt if password_salt.present?
+      user.save_custom_fields if password_hash.present? || password_salt.present?
+
+      activate_discuz_user_from_verified_email!(
+        user,
+        source_uid: import_id,
+        source_email: source_email,
+        source_email_confirmed: confirm_discuz_email,
+      )
+
+      user
+    end
   ensure
     password_hash = nil
     password_salt = nil
+  end
+
+  def reconcile_discuz_user_activation!(source_users)
+    targets =
+      source_users.filter_map do |source_user|
+        target_user_id = user_id_from_imported_user_id(source_user[:uid])
+        [target_user_id, source_user] if target_user_id
+      end
+    return 0 if targets.empty?
+
+    users_by_id = User.includes(:email_tokens).where(id: targets.map(&:first)).index_by(&:id)
+    activated_count = 0
+    confirmed_count = 0
+    targets.each do |target_user_id, source_user|
+      user = users_by_id[target_user_id]
+      uid = source_user[:uid].to_s
+      next unless user && user.custom_fields["discuz_source"] == DISCUZ_SOURCE
+      next unless user.custom_fields["discuz_uid"].to_s == uid
+      next unless user.custom_fields["import_id"].to_s == uid
+      next if discuz_custom_field_enabled?(user, "discuz_missing_bbs_member")
+
+      if !user.active?
+        user.update!(active: true)
+        activated_count += 1
+      end
+      unless source_user[:email_confirmed] && !@duplicate_email_uids.include?(source_user[:uid])
+        next
+      end
+
+      confirmed_count += 1 if activate_discuz_user_from_verified_email!(
+        user,
+        source_uid: source_user[:uid],
+        source_email: source_user[:email],
+        source_email_confirmed: source_user[:email_confirmed],
+      )
+    end
+
+    if activated_count.positive?
+      puts "Reactivated #{activated_count} imported Discuz member account(s)"
+    end
+    if confirmed_count.positive?
+      puts "Confirmed verified Discuz email status for #{confirmed_count} imported account(s)"
+    end
+    activated_count + confirmed_count
+  end
+
+  def activate_discuz_user_from_verified_email!(
+    user,
+    source_uid:,
+    source_email:,
+    source_email_confirmed:
+  )
+    return false unless source_email_confirmed && user&.persisted?
+
+    fields = user.custom_fields
+    return false unless fields["discuz_source"] == DISCUZ_SOURCE
+    return false unless fields["discuz_uid"].to_s == source_uid.to_s
+    return false unless fields["import_id"].to_s == source_uid.to_s
+    return false if discuz_custom_field_enabled?(user, "discuz_duplicate_email")
+    return false if discuz_custom_field_enabled?(user, "discuz_email_conflict")
+    return false if fields["import_email"].present?
+    return false if normalized_discuz_email(source_email).blank?
+    return false unless user.email == source_email.to_s.strip.downcase
+    return false if user.active? && user.email_confirmed?
+
+    user.activate
+    true
+  end
+
+  def discuz_custom_field_enabled?(user, field_name)
+    %w[true t 1].include?(user.custom_fields[field_name].to_s.downcase)
+  end
+
+  def normalized_discuz_email(email)
+    return if email.blank? || !EmailAddressValidator.valid_value?(email)
+
+    normalized =
+      if SiteSetting.normalize_emails?
+        UserEmail.normalize(Email.downcase(email.strip))
+      else
+        Email.downcase(email.strip)
+      end
+    normalized.presence
+  end
+
+  def target_email_conflict_keys(emails)
+    normalized = emails.filter_map { |email| normalized_discuz_email(email) }.uniq
+    return Set.new if normalized.empty?
+
+    email_column = SiteSetting.normalize_emails? ? "normalized_email" : "email"
+    UserEmail
+      .where("LOWER(#{email_column}) IN (?)", normalized.map(&:downcase))
+      .pluck(email_column)
+      .map(&:downcase)
+      .to_set
   end
 
   def import_categories
