@@ -14,6 +14,7 @@ require "php_serialize"
 require "mysql2"
 require_relative "base"
 require_relative "../../tools/discuz_migration/category_permissions"
+require_relative "../../tools/discuz_migration/medals"
 
 class ImportScripts::DiscuzX < ImportScripts::Base
   DISCUZX_DB = ENV.fetch("DISCUZX_DB", "bbs")
@@ -181,6 +182,7 @@ class ImportScripts::DiscuzX < ImportScripts::Base
       ].to_i
       puts "Attachment import deferred until a local read-only attachment snapshot is available"
     end
+    import_discuz_medals if stage == "all"
     prepare_site_for_discuz_import!
     report_source_skips
   end
@@ -2130,6 +2132,287 @@ class ImportScripts::DiscuzX < ImportScripts::Base
     end
 
     puts "", "", "metadata rows imported or refreshed: #{imported_count}", ""
+  end
+
+  def import_discuz_medals
+    source_uids =
+      if @sample_manifest
+        @sample_manifest.fetch("member_uids").map(&:to_i)
+      else
+        mysql_query(
+          "SELECT uid FROM (#{source_member_union}) source_members ORDER BY uid",
+        ).map { |row| row["uid"].to_i }
+      end
+    source_uids = source_uids.uniq.sort
+    users_by_uid = imported_discuz_users_by_uid!(source_uids)
+
+    definitions =
+      mysql_query(
+        "SELECT medalid, name, description, image, available " \
+          "FROM #{table_name("forum_medal")} ORDER BY medalid",
+      ).to_a
+    definition_by_id = definitions.index_by { |row| row["medalid"].to_i }
+
+    source_memberships = {}
+    expired_assignment_count = 0
+    malformed_token_count = 0
+    source_uids.each_slice(1_000) do |uid_batch|
+      next if uid_batch.empty?
+
+      mysql_query(
+        "SELECT uid, medals FROM #{table_name("common_member_field_forum")} " \
+          "WHERE uid IN (#{uid_batch.join(",")})",
+      ).each do |row|
+        parsed =
+          DiscuzMigration::Medals.parse_memberships(row["medals"], now_epoch: Time.current.to_i)
+        source_memberships[row["uid"].to_i] = parsed[:assignments]
+        expired_assignment_count += parsed[:expired_count]
+        malformed_token_count += parsed[:malformed_count]
+      end
+    end
+
+    expected_pairs = Set.new
+    unavailable_assignment_count = 0
+    undefined_assignment_count = 0
+    source_memberships.each do |uid, assignments|
+      assignments.each do |assignment|
+        definition = definition_by_id[assignment[:medalid]]
+        if definition.nil?
+          undefined_assignment_count += 1
+        elsif definition["available"].to_i != 1
+          unavailable_assignment_count += 1
+        else
+          expected_pairs << [uid, assignment[:medalid]]
+        end
+      end
+    end
+
+    award_dates = {}
+    pairs_by_uid = expected_pairs.group_by(&:first)
+    pairs_by_uid
+      .keys
+      .sort
+      .each_slice(1_000) do |uid_batch|
+        batch_pairs = uid_batch.flat_map { |uid| pairs_by_uid.fetch(uid) }
+        medal_ids = batch_pairs.map(&:last).uniq.sort
+        next if medal_ids.empty?
+
+        mysql_query(
+          "SELECT uid, medalid, MAX(dateline) dateline FROM #{table_name("forum_medallog")} " \
+            "WHERE uid IN (#{uid_batch.join(",")}) AND medalid IN (#{medal_ids.join(",")}) " \
+            "AND type IN (0, 1) GROUP BY uid, medalid",
+        ).each do |row|
+          award_dates[[row["uid"].to_i, row["medalid"].to_i]] = discuz_timestamp(row["dateline"])
+        end
+      end
+
+    mappings_by_id = {}
+    imported_count = 0
+    revoked_count = 0
+    fallback_date_count = 0
+    affected_user_ids = Set.new
+
+    ActiveRecord::Base.transaction do
+      SiteSetting.enable_badges = true
+
+      definitions.each do |definition|
+        mapping = sync_discuz_medal_definition!(definition)
+        mappings_by_id[mapping.discuz_medalid.to_i] = mapping
+      end
+
+      known_ids = definition_by_id.keys
+      retired_mappings = DiscourseDiscuzMedals::MedalMapping.includes(:badge)
+      retired_mappings = retired_mappings.where.not(discuz_medalid: known_ids) if known_ids.present?
+      retired_mappings.each do |mapping|
+        mapping.update!(source_available: false)
+        mapping.badge.update!(enabled: false) if mapping.badge.enabled?
+        mappings_by_id[mapping.discuz_medalid.to_i] = mapping
+      end
+
+      tracked_grants =
+        source_uids
+          .each_slice(1_000)
+          .flat_map do |uid_batch|
+            DiscourseDiscuzMedals::UserMedalGrant.where(discuz_uid: uid_batch).to_a
+          end
+      tracked_by_pair =
+        tracked_grants.index_by { |grant| [grant.discuz_uid.to_i, grant.discuz_medalid.to_i] }
+
+      (tracked_by_pair.keys.to_set - expected_pairs).each do |pair|
+        grant = tracked_by_pair.fetch(pair)
+        user_badge =
+          UserBadge.find_by(user_id: grant.user_id, badge_id: grant.badge_id, post_id: nil)
+        if user_badge
+          UserBadge.where(id: user_badge.id).delete_all
+          affected_user_ids << grant.user_id.to_i
+        end
+        grant.destroy!
+        revoked_count += 1
+      end
+
+      expected_pairs.each do |uid, medalid|
+        mapping = mappings_by_id.fetch(medalid)
+        unless mapping.source_available
+          raise "Discuz medal #{medalid} is not enabled in source but appears active"
+        end
+
+        user = users_by_uid.fetch(uid)
+        tracked = tracked_by_pair[[uid, medalid]]
+        if tracked && (tracked.user_id.to_i != user.id || tracked.badge_id.to_i != mapping.badge_id)
+          raise "Discuz medal mapping changed for UID #{uid}, medal #{medalid}"
+        end
+
+        user_badge = UserBadge.find_by(user_id: user.id, badge_id: mapping.badge_id, post_id: nil)
+        if user_badge && !tracked
+          raise "Discuz medal badge already exists without importer ownership for UID #{uid}, medal #{medalid}"
+        end
+        if user_badge.nil? && UserBadge.exists?(user_id: user.id, badge_id: mapping.badge_id)
+          raise "Discuz medal badge has an unexpected post-specific grant for UID #{uid}, medal #{medalid}"
+        end
+
+        source_awarded_at = award_dates[[uid, medalid]]
+        granted_at = source_awarded_at || user.created_at || Time.current
+        fallback_date_count += 1 if source_awarded_at.nil?
+        if user_badge.nil?
+          now = Time.current
+          UserBadge.insert_all!(
+            [
+              {
+                badge_id: mapping.badge_id,
+                user_id: user.id,
+                granted_by_id: Discourse.system_user.id,
+                granted_at: granted_at,
+                post_id: nil,
+                seq: 0,
+                created_at: now,
+              },
+            ],
+          )
+          affected_user_ids << user.id
+        elsif user_badge.granted_at.to_i != granted_at.to_i
+          user_badge.update_columns(granted_at: granted_at)
+          affected_user_ids << user.id
+        end
+
+        grant =
+          tracked ||
+            DiscourseDiscuzMedals::UserMedalGrant.new(discuz_uid: uid, discuz_medalid: medalid)
+        grant.assign_attributes(
+          user_id: user.id,
+          badge_id: mapping.badge_id,
+          source_expiration_at:
+            source_memberships.fetch(uid).find { |assignment| assignment[:medalid] == medalid }[
+              :expiration
+            ],
+          source_awarded_at: source_awarded_at,
+        )
+        grant.save!
+        imported_count += 1 unless tracked
+      end
+    end
+
+    badge_ids = mappings_by_id.values.map(&:badge_id).uniq
+    badge_grant_counts = UserBadge.where(badge_id: badge_ids).group(:badge_id).count
+    Badge
+      .where(id: badge_ids)
+      .find_each do |badge|
+        expected_count = badge_grant_counts.fetch(badge.id, 0)
+        badge.update_columns(grant_count: expected_count) if badge.grant_count != expected_count
+      end
+    unless affected_user_ids.empty?
+      UserStat.update_distinct_badge_count(affected_user_ids.to_a)
+      UserBadge.update_featured_ranks!(affected_user_ids.to_a)
+    end
+
+    @source_skip_counts["medal_expired_assignments"] += expired_assignment_count
+    @source_skip_counts["medal_unavailable_assignments"] += unavailable_assignment_count
+    @source_skip_counts["medal_assignments_without_definition"] += undefined_assignment_count
+    @source_skip_counts["medal_malformed_membership_tokens"] += malformed_token_count
+
+    puts "Discuz medal definitions synchronized: #{definitions.length}"
+    puts "Current active Discuz medal awards reconciled: #{expected_pairs.length}"
+    puts "New awards: #{imported_count}; revoked or expired awards: #{revoked_count}"
+    puts "Awards without a source grant log, using account creation date: #{fallback_date_count}"
+  end
+
+  def imported_discuz_users_by_uid!(source_uids)
+    imported_by_uid = Hash.new { |hash, uid| hash[uid] = [] }
+    source_uids.each_slice(1_000) do |uid_batch|
+      UserCustomField
+        .where(name: "import_id", value: uid_batch.map(&:to_s))
+        .pluck(:value, :user_id)
+        .each { |value, user_id| imported_by_uid[value.to_i] << user_id.to_i }
+    end
+
+    duplicate_uids = imported_by_uid.select { |_uid, user_ids| user_ids.uniq.length != 1 }
+    missing_uids = source_uids - imported_by_uid.keys
+    unless duplicate_uids.empty? && missing_uids.empty?
+      raise "Discuz medal stage requires one imported user per source UID (missing=#{missing_uids.length}, ambiguous=#{duplicate_uids.length})"
+    end
+
+    user_ids = imported_by_uid.values.flatten.uniq
+    fields = { source: {}, uid: {} }
+    user_ids.each_slice(1_000) do |user_id_batch|
+      UserCustomField
+        .where(user_id: user_id_batch, name: %w[discuz_source discuz_uid])
+        .pluck(:user_id, :name, :value)
+        .each do |user_id, name, value|
+          fields[:source][user_id.to_i] = value if name == "discuz_source"
+          fields[:uid][user_id.to_i] = value.to_s if name == "discuz_uid"
+        end
+    end
+
+    mismatched_uids =
+      source_uids.count do |uid|
+        user_id = imported_by_uid.fetch(uid).first
+        fields[:source][user_id] != DISCUZ_SOURCE || fields[:uid][user_id] != uid.to_s
+      end
+    if mismatched_uids.positive?
+      raise "Discuz medal stage found #{mismatched_uids} users without matching source UID markers"
+    end
+
+    User.where(id: user_ids).index_by { |user| fields[:uid].fetch(user.id).to_i }
+  end
+
+  def sync_discuz_medal_definition!(definition)
+    medalid = definition["medalid"].to_i
+    source_name = definition["name"].to_s.presence || "Discuz 勋章 #{medalid}"
+    badge_name = DiscuzMigration::Medals.badge_name(medalid, source_name)
+    mapping = DiscourseDiscuzMedals::MedalMapping.find_by(discuz_medalid: medalid)
+    badge = mapping&.badge
+
+    raise "Discuz medal #{medalid} points to a missing Discourse badge" if mapping && badge.nil?
+    if badge.nil? && Badge.exists?(name: badge_name)
+      raise "Discuz medal badge name collides with an existing native badge: #{badge_name}"
+    end
+    badge ||= Badge.new
+    badge.assign_attributes(
+      name: badge_name,
+      description: definition["description"].to_s.truncate(500),
+      badge_type_id: BadgeType::Bronze,
+      badge_grouping_id: BadgeGrouping::Community,
+      icon: "certificate",
+      enabled: definition["available"].to_i == 1,
+      listable: true,
+      allow_title: false,
+      multiple_grant: false,
+      auto_revoke: false,
+      trigger: Badge::Trigger::None,
+      show_posts: true,
+      show_in_post_header: true,
+    )
+    badge.save!
+
+    mapping ||= DiscourseDiscuzMedals::MedalMapping.new(discuz_medalid: medalid)
+    mapping.assign_attributes(
+      badge_id: badge.id,
+      source_name: source_name,
+      source_description: definition["description"].to_s,
+      source_image: definition["image"].to_s,
+      source_available: definition["available"].to_i == 1,
+    )
+    mapping.save!
+    mapping
   end
 
   # Create the full path to the discuz avatar specified from user id

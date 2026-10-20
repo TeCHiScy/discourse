@@ -4,6 +4,7 @@
 require "json"
 require "mysql2"
 require_relative "category_permissions"
+require_relative "medals"
 require_relative "../../script/import_scripts/base"
 
 class DiscuzImportVerifier
@@ -53,6 +54,8 @@ class DiscuzImportVerifier
         :identities
       elsif ARGV.include?("--sample-attachments")
         :attachments
+      elsif ARGV.include?("--sample-medals")
+        :medals
       elsif ARGV.include?("--sample-acceptance")
         :acceptance
       end
@@ -65,6 +68,8 @@ class DiscuzImportVerifier
           source_preflight
         elsif sample_stage == :attachments
           verify_sample_attachments
+        elsif sample_stage == :medals
+          verify_discuz_medals(@sample_manifest.fetch("member_uids"), mode: "sample_discuz_medals")
         elsif sample_stage
           verify_sample(sample_stage)
         else
@@ -206,7 +211,9 @@ class DiscuzImportVerifier
     category_content_report = verify_categories(source, category_imports)
     password_report = verify_legacy_password_fields(source, user_imports)
     sample_source_integrity = verify_sample_source_integrity(source)
+    medal_report =
       if stage == :acceptance
+        verify_discuz_medals(@sample_manifest.fetch("member_uids"), mode: "sample_discuz_medals")
       end
     content_reports =
       if stage == :acceptance
@@ -240,6 +247,7 @@ class DiscuzImportVerifier
       category_content_report[:access_metadata_mismatches],
       password_report[:failure_count],
       sample_source_integrity[:mismatch_count],
+      medal_report&.dig(:acceptance, :failure_count),
     ]
     core_failures.compact!
     if post_report && pm_report
@@ -291,6 +299,7 @@ class DiscuzImportVerifier
       },
       posts: post_report || { status: "deferred_until_sample_content_stage" },
       private_messages: pm_report || { status: "deferred_until_sample_content_stage" },
+      medals: medal_report || { status: "deferred_until_sample_medal_stage" },
       acceptance: {
         status:
           (
@@ -472,6 +481,287 @@ class DiscuzImportVerifier
     }
   end
 
+  def verify_discuz_medals(source_uids, mode:)
+    if mode == "sample_discuz_medals" && @sample_manifest.nil?
+      raise "sample medal verification requires DISCUZX_SAMPLE_MANIFEST"
+    end
+
+    source_uids = source_uids.map(&:to_i).uniq.sort
+    definitions =
+      rows("SELECT medalid, name, description, image, available FROM #{bbs("forum_medal")}")
+    definitions_by_id = definitions.index_by { |row| row["medalid"].to_i }
+
+    target_mappings = ::DiscourseDiscuzMedals::MedalMapping.includes(:badge).to_a
+    mappings_by_id = target_mappings.index_by { |mapping| mapping.discuz_medalid.to_i }
+    source_definition_ids = definitions_by_id.keys.to_set
+    target_mapping_ids = mappings_by_id.keys.to_set
+    missing_definition_count = (source_definition_ids - target_mapping_ids).length
+    duplicate_mapping_count = target_mappings.length - target_mapping_ids.length
+    retired_active_mapping_count =
+      target_mappings.count do |mapping|
+        !source_definition_ids.include?(mapping.discuz_medalid.to_i) &&
+          (mapping.source_available || mapping.badge&.enabled?)
+      end
+
+    definition_metadata_mismatch_count = 0
+    badge_definition_mismatch_count = 0
+    definitions.each do |definition|
+      medalid = definition["medalid"].to_i
+      mapping = mappings_by_id[medalid]
+      next unless mapping
+
+      expected_name = definition["name"].to_s.presence || "Discuz 勋章 #{medalid}"
+      expected_available = definition["available"].to_i == 1
+      if mapping.source_name != expected_name ||
+           mapping.source_description != definition["description"].to_s ||
+           mapping.source_image != definition["image"].to_s ||
+           mapping.source_available != expected_available
+        definition_metadata_mismatch_count += 1
+      end
+
+      badge = mapping.badge
+      if badge.nil? || badge.name != DiscuzMigration::Medals.badge_name(medalid, expected_name) ||
+           badge.enabled? != expected_available
+        badge_definition_mismatch_count += 1
+      end
+    end
+
+    imported_users_by_uid = Hash.new { |hash, uid| hash[uid] = [] }
+    source_uids.each_slice(1_000) do |uid_batch|
+      UserCustomField
+        .where(name: "import_id", value: uid_batch.map(&:to_s))
+        .pluck(:value, :user_id)
+        .each { |value, user_id| imported_users_by_uid[value.to_i] << user_id.to_i }
+    end
+    duplicate_user_uid_count =
+      imported_users_by_uid.count { |_uid, user_ids| user_ids.uniq.length > 1 }
+    uid_to_user =
+      imported_users_by_uid
+        .filter_map { |uid, user_ids| [uid, user_ids.first] if user_ids.uniq.length == 1 }
+        .to_h
+    missing_user_count = (source_uids - uid_to_user.keys).length
+
+    source_user_ids = uid_to_user.values.uniq
+    source_markers = {}
+    source_user_ids.each_slice(1_000) do |user_id_batch|
+      UserCustomField
+        .where(user_id: user_id_batch, name: %w[discuz_source discuz_uid])
+        .pluck(:user_id, :name, :value)
+        .each { |user_id, name, value| source_markers[[user_id.to_i, name]] = value.to_s }
+    end
+    marker_mismatch_count =
+      uid_to_user.count do |uid, user_id|
+        source_markers[[user_id, "discuz_source"]] != "discuz_x3.5" ||
+          source_markers[[user_id, "discuz_uid"]] != uid.to_s
+      end
+
+    source_memberships = {}
+    expired_assignment_count = 0
+    malformed_token_count = 0
+    source_uids.each_slice(1_000) do |uid_batch|
+      next if uid_batch.empty?
+
+      rows(
+        "SELECT uid, medals FROM #{bbs("common_member_field_forum")} " \
+          "WHERE uid IN (#{uid_batch.join(",")})",
+      ).each do |row|
+        parsed = DiscuzMigration::Medals.parse_memberships(row["medals"], now_epoch: Time.now.to_i)
+        uid = row["uid"].to_i
+        source_memberships[uid] = parsed[:assignments]
+        expired_assignment_count += parsed[:expired_count]
+        malformed_token_count += parsed[:malformed_count]
+      end
+    end
+
+    expected_pairs = Set.new
+    expected_expiration_by_pair = {}
+    unavailable_assignment_count = 0
+    undefined_assignment_count = 0
+    source_memberships.each do |uid, assignments|
+      assignments.each do |assignment|
+        definition = definitions_by_id[assignment[:medalid]]
+        if definition.nil?
+          undefined_assignment_count += 1
+        elsif definition["available"].to_i != 1
+          unavailable_assignment_count += 1
+        else
+          pair = [uid, assignment[:medalid]]
+          expected_pairs << pair
+          expected_expiration_by_pair[pair] = assignment[:expiration]
+        end
+      end
+    end
+
+    source_award_dates = {}
+    pairs_by_uid = expected_pairs.group_by(&:first)
+    pairs_by_uid
+      .keys
+      .sort
+      .each_slice(1_000) do |uid_batch|
+        batch_pairs = uid_batch.flat_map { |uid| pairs_by_uid.fetch(uid) }
+        medal_ids = batch_pairs.map(&:last).uniq.sort
+        next if medal_ids.empty?
+
+        rows(
+          "SELECT uid, medalid, MAX(dateline) dateline FROM #{bbs("forum_medallog")} " \
+            "WHERE uid IN (#{uid_batch.join(",")}) AND medalid IN (#{medal_ids.join(",")}) " \
+            "AND type IN (0, 1) GROUP BY uid, medalid",
+        ).each do |row|
+          dateline = row["dateline"].to_i
+          source_award_dates[
+            [row["uid"].to_i, row["medalid"].to_i]
+          ] = dateline if dateline.positive?
+        end
+      end
+
+    imported_grants =
+      source_uids
+        .each_slice(1_000)
+        .flat_map do |uid_batch|
+          ::DiscourseDiscuzMedals::UserMedalGrant.where(discuz_uid: uid_batch).to_a
+        end
+    actual_grant_pairs =
+      imported_grants.map { |grant| [grant.discuz_uid.to_i, grant.discuz_medalid.to_i] }.to_set
+    duplicate_grant_count = imported_grants.length - actual_grant_pairs.length
+    grant_pair_comparison = compare_ids(expected_pairs, actual_grant_pairs)
+
+    mapping_badge_ids = mappings_by_id.transform_values { |mapping| mapping.badge_id.to_i }
+    grant_ownership_mismatch_count = 0
+    expiration_mismatch_count = 0
+    source_award_date_mismatch_count = 0
+    imported_grants.each do |grant|
+      pair = [grant.discuz_uid.to_i, grant.discuz_medalid.to_i]
+      expected_user_id = uid_to_user[pair.first]
+      expected_badge_id = mapping_badge_ids[pair.last]
+      if grant.user_id.to_i != expected_user_id || grant.badge_id.to_i != expected_badge_id
+        grant_ownership_mismatch_count += 1
+      end
+      if expected_expiration_by_pair.key?(pair) &&
+           grant.source_expiration_at.to_i != expected_expiration_by_pair[pair].to_i
+        expiration_mismatch_count += 1
+      end
+      if expected_pairs.include?(pair) && grant.source_awarded_at&.to_i != source_award_dates[pair]
+        source_award_date_mismatch_count += 1
+      end
+    end
+
+    reverse_uid_map = uid_to_user.invert
+    reverse_badge_map = mapping_badge_ids.invert
+    native_badge_rows = []
+    native_badge_ids = mapping_badge_ids.values.uniq
+    if native_badge_ids.present?
+      source_user_ids.each_slice(1_000) do |user_id_batch|
+        native_badge_rows.concat(
+          UserBadge.where(user_id: user_id_batch, badge_id: native_badge_ids).pluck(
+            :user_id,
+            :badge_id,
+            :post_id,
+          ),
+        )
+      end
+    end
+
+    native_pairs = Set.new
+    unmapped_native_badge_count = 0
+    post_specific_native_badge_count = 0
+    native_badge_rows.each do |user_id, badge_id, post_id|
+      uid = reverse_uid_map[user_id.to_i]
+      medalid = reverse_badge_map[badge_id.to_i]
+      if uid.nil? || medalid.nil?
+        unmapped_native_badge_count += 1
+        next
+      end
+      native_pairs << [uid, medalid]
+      post_specific_native_badge_count += 1 if post_id.present?
+    end
+    native_pair_comparison = compare_ids(expected_pairs, native_pairs)
+
+    target_users = User.where(id: source_user_ids).index_by(&:id)
+    native_user_badges = {}
+    if native_badge_ids.present?
+      source_user_ids.each_slice(1_000) do |user_id_batch|
+        UserBadge
+          .where(user_id: user_id_batch, badge_id: native_badge_ids)
+          .each do |user_badge|
+            native_user_badges[[user_badge.user_id, user_badge.badge_id]] = user_badge
+          end
+      end
+    end
+
+    missing_award_date_count = 0
+    native_award_timestamp_mismatch_count = 0
+    expected_pairs.each do |uid, medalid|
+      user_id = uid_to_user[uid]
+      badge_id = mapping_badge_ids[medalid]
+      next unless user_id && badge_id
+
+      user_badge = native_user_badges[[user_id, badge_id]]
+      next unless user_badge
+
+      source_dateline = source_award_dates[[uid, medalid]]
+      expected_granted_at =
+        source_dateline ? Time.zone.at(source_dateline) : target_users[user_id]&.created_at
+      missing_award_date_count += 1 unless source_dateline
+      if expected_granted_at && user_badge.granted_at.to_i != expected_granted_at.to_i
+        native_award_timestamp_mismatch_count += 1
+      end
+    end
+
+    enable_badges_failure = SiteSetting.enable_badges ? 0 : 1
+    failure_count =
+      missing_definition_count + duplicate_mapping_count + retired_active_mapping_count +
+        definition_metadata_mismatch_count + badge_definition_mismatch_count +
+        duplicate_user_uid_count + missing_user_count + marker_mismatch_count +
+        malformed_token_count + grant_pair_comparison[:missing_count] +
+        grant_pair_comparison[:unexpected_count] + duplicate_grant_count +
+        grant_ownership_mismatch_count + expiration_mismatch_count +
+        source_award_date_mismatch_count + native_pair_comparison[:missing_count] +
+        native_pair_comparison[:unexpected_count] + unmapped_native_badge_count +
+        post_specific_native_badge_count + native_award_timestamp_mismatch_count +
+        enable_badges_failure
+
+    {
+      mode: mode,
+      sampled_member_uids: source_uids.length,
+      source_definition_count: definitions.length,
+      target_mapping_count: target_mappings.length,
+      missing_definition_count: missing_definition_count,
+      duplicate_mapping_count: duplicate_mapping_count,
+      active_retired_mapping_count: retired_active_mapping_count,
+      definition_metadata_mismatch_count: definition_metadata_mismatch_count,
+      native_badge_definition_mismatch_count: badge_definition_mismatch_count,
+      native_badge_setting_enabled: SiteSetting.enable_badges,
+      source_assignment_count: expected_pairs.length,
+      expired_source_assignment_count: expired_assignment_count,
+      unavailable_source_assignment_count: unavailable_assignment_count,
+      assignments_without_definition_count: undefined_assignment_count,
+      malformed_membership_token_count: malformed_token_count,
+      target_user_mapping_missing_count: missing_user_count,
+      target_user_mapping_duplicate_count: duplicate_user_uid_count,
+      target_user_source_marker_mismatch_count: marker_mismatch_count,
+      imported_assignment_count: actual_grant_pairs.length,
+      assignment_ledger_comparison: grant_pair_comparison,
+      duplicate_assignment_ledger_count: duplicate_grant_count,
+      assignment_ownership_mismatch_count: grant_ownership_mismatch_count,
+      assignment_expiration_mismatch_count: expiration_mismatch_count,
+      assignment_award_date_mismatch_count: source_award_date_mismatch_count,
+      native_user_badge_comparison: native_pair_comparison,
+      native_badges_without_mapping_count: unmapped_native_badge_count,
+      post_specific_native_medal_badge_count: post_specific_native_badge_count,
+      native_award_timestamp_mismatch_count: native_award_timestamp_mismatch_count,
+      awards_using_account_creation_fallback_date: missing_award_date_count,
+      intentional_exclusions: {
+        undefined_medal_definition: undefined_assignment_count,
+      },
+      image_handling:
+        "Valid Discuz medal filenames link to the legacy static host; image files are not copied",
+      acceptance: {
+        status: failure_count.zero? ? "passed" : "failed",
+        failure_count: failure_count,
+      },
+    }
+  end
+
   def verify_import
     source = load_source_data
     source_report = source_metrics(source)
@@ -503,6 +793,7 @@ class DiscuzImportVerifier
     post_report = verify_posts(source, user_imports, category_imports)
     pm_report = verify_private_messages(source, user_imports, pm_posts, pm_duplicate_values)
     password_report = verify_legacy_password_fields(source, user_imports)
+    medal_report = verify_discuz_medals(source[:member_ids], mode: "discuz_medal_acceptance")
 
     core_failures = [
       user_comparison[:missing_count],
@@ -528,6 +819,7 @@ class DiscuzImportVerifier
       post_report[:failure_count],
       pm_report[:failure_count],
       password_report[:failure_count],
+      medal_report.dig(:acceptance, :failure_count),
     ]
 
     {
@@ -557,6 +849,7 @@ class DiscuzImportVerifier
       },
       posts: post_report,
       private_messages: pm_report,
+      medals: medal_report,
       deferred: {
         category_access: {
           status: "staff_only_fallback_exact_mapping_pending",
