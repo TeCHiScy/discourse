@@ -14,6 +14,7 @@ require "php_serialize"
 require "mysql2"
 require_relative "base"
 require_relative "../../tools/discuz_migration/category_permissions"
+require_relative "../../tools/discuz_migration/category_eligibility"
 require_relative "../../tools/discuz_migration/medals"
 
 class ImportScripts::DiscuzX < ImportScripts::Base
@@ -218,6 +219,11 @@ class ImportScripts::DiscuzX < ImportScripts::Base
   end
 
   def prepare_site_for_discuz_import!
+    remove_untouched_general_category!
+    configure_default_sidebar_categories!
+  end
+
+  def remove_untouched_discourse_seed_content!
     require "seed_data/topics"
     seed_topic_settings = %w[guidelines_topic_id welcome_topic_id admin_quick_start_topic_id]
     original_topic_ids = seed_topic_settings.to_h { |name| [name, SiteSetting.get(name).to_i] }
@@ -232,6 +238,8 @@ class ImportScripts::DiscuzX < ImportScripts::Base
         next if posts.empty?
         next if posts.where.not(user_id: Discourse::SYSTEM_USER_ID).exists?
         next if posts.where.not(last_editor_id: Discourse::SYSTEM_USER_ID).exists?
+        next if PostCustomField.exists?(post_id: posts.select(:id), name: "import_id")
+        next if TopicCustomField.exists?(topic_id: topic_id, name: "import_id")
 
         setting_name
       end
@@ -240,20 +248,195 @@ class ImportScripts::DiscuzX < ImportScripts::Base
       skip_changed: true,
     )
 
-    removed = []
-    safe_seed_topics.each do |setting_name|
-      topic_id = original_topic_ids.fetch(setting_name)
+    # Positive IDs tell Discourse seed fixtures these topics were already initialized.
+    removed =
+      safe_seed_topics.filter do |setting_name|
+        !Topic.exists?(id: original_topic_ids.fetch(setting_name))
+      end
 
-      topic = Topic.find_by(id: topic_id)
-      next if topic && topic.deleted_at.blank?
+    puts "Removed #{removed.length} untouched default Discourse topic(s); retained retired IDs to prevent reseeding"
+    remove_untouched_default_categories!(original_topic_ids.values)
+  end
 
-      SiteSetting.set(setting_name, -1)
-      removed << setting_name
+  def remove_untouched_default_categories!(seed_topic_ids)
+    require "seed_data/categories"
+    category_settings = { "meta_category_id" => "site-feedback", "staff_category_id" => "staff" }
+
+    removals =
+      category_settings.filter_map do |setting_name, expected_slug|
+        category_id = SiteSetting.get(setting_name).to_i
+        category = Category.find_by(id: category_id) if category_id.positive?
+        next unless category
+
+        reasons, chat_channels =
+          default_category_removal_check(category, expected_slug, seed_topic_ids)
+        if reasons.any?
+          raise "refusing to remove default category #{setting_name} (#{category.id}): #{reasons.join("; ")}"
+        end
+
+        { setting_name: setting_name, category: category, chat_channels: chat_channels }
+      end
+
+    return if removals.empty?
+
+    ActiveRecord::Base.transaction do
+      removals.each do |removal|
+        category = removal.fetch(:category)
+        removal
+          .fetch(:chat_channels)
+          .each do |channel|
+            channel
+              .user_chat_channel_memberships
+              .where(join_mode: Chat::UserChatChannelMembership.join_modes[:automatic])
+              .delete_all
+            channel.destroy!
+          end
+        CategoryFeaturedTopic.where(category_id: category.id).delete_all
+        sidebar_ids = SiteSetting.default_navigation_menu_categories.split("|")
+        if sidebar_ids.include?(category.id.to_s)
+          SiteSetting.default_navigation_menu_categories =
+            (sidebar_ids - [category.id.to_s]).join("|")
+        end
+
+        category.destroy!
+        # Keep the positive ID as a tombstone so core seed data will not recreate this category.
+        SiteSetting.set(removal.fetch(:setting_name), category.id)
+      end
     end
 
-    puts "Removed #{removed.length} untouched default Discourse topic(s); edited seed topics were preserved"
-    remove_untouched_general_category!
-    configure_default_sidebar_categories!
+    removals.each do |removal|
+      category = removal.fetch(:category)
+      puts "Removed untouched default Discourse category #{removal.fetch(:setting_name)} (#{category.id})"
+    end
+  end
+
+  def default_category_removal_check(category, expected_slug, seed_topic_ids)
+    reasons = []
+    reasons << "slug changed to #{category.slug}" unless category.slug == expected_slug
+    reasons << "category is not system-owned" unless category.user_id == Discourse::SYSTEM_USER_ID
+    if CategoryCustomField.exists?(category_id: category.id, name: "import_id")
+      reasons << "category has a Discuz import marker"
+    end
+    reasons << "category has child categories" if category.has_children?
+    unless SeedData::Categories.with_default_locale.send(:unchanged?, category)
+      reasons << "category definition was edited"
+    end
+
+    allowed_topic_ids = ([category.topic_id] + seed_topic_ids).compact.uniq
+    category_topics = Topic.with_deleted.where(category_id: category.id)
+    allowed_topic_ids.concat(safe_deleted_default_topic_ids(category_topics, allowed_topic_ids))
+    unexpected_topic_ids = category_topics.where.not(id: allowed_topic_ids).pluck(:id)
+    if unexpected_topic_ids.any?
+      reasons << "contains non-seed topics #{unexpected_topic_ids.join(",")}"
+    end
+
+    safe_topic_ids = category_topics.where(id: allowed_topic_ids).pluck(:id)
+    posts = Post.with_deleted.where(topic_id: safe_topic_ids)
+    if posts.where.not(user_id: Discourse::SYSTEM_USER_ID).exists?
+      reasons << "contains non-system posts"
+    end
+    if posts.where.not(last_editor_id: Discourse::SYSTEM_USER_ID).exists?
+      reasons << "contains non-system edits"
+    end
+    if posts
+         .where.not(deleted_by_id: nil)
+         .where.not(deleted_by_id: Discourse::SYSTEM_USER_ID)
+         .exists?
+      reasons << "contains user-deleted posts"
+    end
+    if PostCustomField.exists?(post_id: posts.select(:id), name: "import_id")
+      reasons << "contains Discuz post markers"
+    end
+    if TopicCustomField.exists?(topic_id: safe_topic_ids, name: "import_id")
+      reasons << "contains Discuz topic markers"
+    end
+    reasons << "has category followers" if CategoryUser.where(category_id: category.id).exists?
+    reasons << "has category tags" if category.category_tags.exists?
+    unexpected_featured_topics =
+      CategoryFeaturedTopic.where(category_id: category.id).where.not(topic_id: allowed_topic_ids)
+    reasons << "has non-definition featured topics" if unexpected_featured_topics.exists?
+
+    chat_channels = []
+    if defined?(Chat::Channel)
+      chat_channels = Chat::Channel.where(chatable_type: "Category", chatable_id: category.id).to_a
+      chat_channels.each do |channel|
+        chat_content = []
+        chat_content << "messages" if channel.chat_messages.with_deleted.exists?
+        chat_content << "threads" if channel.threads.exists?
+        automatic_memberships =
+          channel.user_chat_channel_memberships.where(
+            join_mode: Chat::UserChatChannelMembership.join_modes[:automatic],
+          )
+        if channel
+             .user_chat_channel_memberships
+             .where.not(id: automatic_memberships.select(:id))
+             .exists?
+          chat_content << "manual memberships"
+        end
+        if !untouched_default_category_chat_channel?(channel, category)
+          reasons << "chat channel #{channel.id} was edited"
+        end
+        chat_content << "pinned messages" if channel.pinned_messages.exists?
+        chat_content << "archive" if channel.chat_channel_archive.present?
+        chat_content << "drafts" if Chat::Draft.where(chat_channel_id: channel.id).exists?
+        if Chat::IncomingWebhook.where(chat_channel_id: channel.id).exists?
+          chat_content << "webhooks"
+        end
+        if Chat::ChannelCustomField.where(channel_id: channel.id).exists?
+          chat_content << "custom fields"
+        end
+        chat_content << "last-message reference" if channel.last_message_id.present?
+        reasons << "chat channel #{channel.id} has #{chat_content.join(", ")}" if chat_content.any?
+      end
+    end
+
+    [reasons, chat_channels]
+  end
+
+  def untouched_default_category_chat_channel?(channel, category)
+    channel.is_a?(Chat::CategoryChannel) && channel.name == category.name &&
+      channel.slug == category.slug && channel.description.blank? && channel.status == "open" &&
+      channel.auto_join_users? && channel.allow_channel_wide_mentions? &&
+      !channel.threading_enabled? && channel.emoji.blank? && channel.deleted_at.blank? &&
+      channel.delete_after_seconds.blank?
+  end
+
+  def safe_deleted_default_topic_ids(category_topics, known_topic_ids)
+    candidates =
+      category_topics
+        .where.not(id: known_topic_ids)
+        .where.not(deleted_at: nil)
+        .where(user_id: Discourse::SYSTEM_USER_ID, deleted_by_id: Discourse::SYSTEM_USER_ID)
+        .pluck(:id)
+    return [] if candidates.empty?
+
+    posts = Post.with_deleted.where(topic_id: candidates)
+    posted_topic_ids = posts.distinct.pluck(:topic_id).to_set
+    unsafe_topic_ids = Set.new
+    unsafe_topic_ids.merge(
+      posts.where.not(user_id: Discourse::SYSTEM_USER_ID).distinct.pluck(:topic_id),
+    )
+    unsafe_topic_ids.merge(
+      posts.where.not(last_editor_id: Discourse::SYSTEM_USER_ID).distinct.pluck(:topic_id),
+    )
+    unsafe_topic_ids.merge(
+      posts
+        .where.not(deleted_by_id: nil)
+        .where.not(deleted_by_id: Discourse::SYSTEM_USER_ID)
+        .distinct
+        .pluck(:topic_id),
+    )
+
+    marker_post_ids =
+      PostCustomField.where(name: "import_id", post_id: posts.select(:id)).pluck(:post_id)
+    if marker_post_ids.any?
+      unsafe_topic_ids.merge(Post.with_deleted.where(id: marker_post_ids).distinct.pluck(:topic_id))
+    end
+    unsafe_topic_ids.merge(
+      TopicCustomField.where(name: "import_id", topic_id: candidates).pluck(:topic_id),
+    )
+
+    ((candidates.to_set & posted_topic_ids) - unsafe_topic_ids).to_a
   end
 
   def configure_default_sidebar_categories!
@@ -263,7 +446,7 @@ class ImportScripts::DiscuzX < ImportScripts::Base
 
     source_category_ids =
       @category_rows_by_id.values.filter_map do |row|
-        next if row["type"] == "group" || row["status"].to_i == 2
+        next unless DiscuzCategoryEligibility.importable?(row)
 
         row["id"].to_i
       end
@@ -474,7 +657,7 @@ class ImportScripts::DiscuzX < ImportScripts::Base
       mysql_query("SELECT count(*) count FROM (#{source_member_union}) members").first["count"].to_i
     actual_categories =
       mysql_query(
-        "SELECT count(*) count FROM #{table_name("forum_forum")} WHERE type <> 'group' AND status <> 2",
+        "SELECT count(*) count FROM #{table_name("forum_forum")} WHERE #{DiscuzCategoryEligibility.sql_condition}",
       ).first[
         "count"
       ].to_i
@@ -1069,6 +1252,8 @@ class ImportScripts::DiscuzX < ImportScripts::Base
 
   def import_categories
     puts "", "creating categories"
+    remove_untouched_discourse_seed_content!
+    DiscuzCategoryEligibility.ensure_site_nesting!
 
     get_knowledge_about_category_slug
 
@@ -1104,11 +1289,17 @@ class ImportScripts::DiscuzX < ImportScripts::Base
         results,
         medals_enabled: @source_medals_enabled,
       )
+    @category_effective_parent_ids =
+      DiscuzCategoryEligibility.effective_parent_ids(
+        results,
+        max_nesting: DiscuzCategoryEligibility::MAX_CATEGORY_NESTING,
+      )
     @category_display_names = category_display_names(results)
+    restrict_excluded_imported_categories!(results)
     max_position = Category.maximum(:position) || 0
     ordered_results = results.sort_by { |row| [category_depth(row, results), row["id"].to_i] }
     create_categories(ordered_results) do |row|
-      next if row["type"] == "group" || row["status"] == 2 # or row['status'].to_i == 3 # 如果不想导入群组，取消注释
+      next unless DiscuzCategoryEligibility.importable?(row)
       extra = PHP.unserialize(row["extra"]) if row["extra"].present?
       color = extra["namecolor"][1, 6] if extra && extra["namecolor"].present?
       read_restricted = @source_category_read_restricted[row["id"].to_i]
@@ -1116,26 +1307,20 @@ class ImportScripts::DiscuzX < ImportScripts::Base
       h = {
         id: row["id"],
         name: @category_display_names.fetch(row["id"].to_i),
-        description: row["description"],
+        description: process_discuz_category_text(row["description"]),
         position: row["position"].to_i + max_position,
         color: color,
         read_restricted: read_restricted,
+        skip_category_definition: true,
+        custom_fields: {
+          "discuz_rules" => process_discuz_category_text(row["rules"]),
+        },
         post_create_action:
           lambda do |category|
             if slug = @category_slug[row["id"]]
               category.update(slug: slug)
             end
 
-            raw = process_discuzx_post(row["rules"], nil)
-            if @bbcode_to_md
-              raw =
-                begin
-                  raw.bbcode_to_md(false)
-                rescue StandardError
-                  raw
-                end
-            end
-            category.topic.posts.first.update_attribute(:raw, raw)
             if row["icon"].present? && attachments_enabled?
               icon_path = snapshot_file(File.join(ATTACHMENT_DIR, "../common", row["icon"]))
               upload =
@@ -1166,15 +1351,18 @@ class ImportScripts::DiscuzX < ImportScripts::Base
             category
           end,
       }
-      if row["parent_id"].to_i > 0
-        h[:parent_category_id] = category_id_from_imported_category_id(row["parent_id"])
+      if (parent_source_id = @category_effective_parent_ids[row["id"].to_i])
+        h[:parent_category_id] = category_id_from_imported_category_id(parent_source_id) ||
+          raise("importable Discuz parent #{parent_source_id} has no Discourse mapping")
       end
       h
     end
 
+    reconcile_imported_category_hierarchy(ordered_results)
+
     category_access_rows =
       results.filter_map do |row|
-        next if row["type"] == "group" || row["status"] == 2
+        next unless DiscuzCategoryEligibility.importable?(row)
 
         category_id = category_id_from_imported_category_id(row["id"])
         category = Category.find_by(id: category_id) if category_id
@@ -1211,6 +1399,70 @@ class ImportScripts::DiscuzX < ImportScripts::Base
     puts "Category access fallback: #{@category_access_summary.sort.map { |name, count| "#{name}=#{count}" }.join(", ")}"
   end
 
+  def reconcile_imported_category_hierarchy(rows)
+    reconciled = 0
+    deepest_first =
+      rows
+        .select { |row| DiscuzCategoryEligibility.importable?(row) }
+        .sort_by { |row| [-category_depth(row, rows), row["id"].to_i] }
+
+    Category.transaction do
+      deepest_first.each do |row|
+        category_id = category_id_from_imported_category_id(row["id"].to_i)
+        raise "importable Discuz category #{row["id"]} has no Discourse mapping" unless category_id
+
+        category = Category.find_by(id: category_id)
+        raise "mapped Discourse category #{category_id} is missing" unless category
+
+        expected_parent_id = imported_category_parent_id(row)
+
+        expected_name = @category_display_names.fetch(row["id"].to_i)
+        updates = {}
+        updates[:name] = expected_name if category.name != expected_name
+        if category.parent_category_id != expected_parent_id
+          updates[:parent_category_id] = expected_parent_id
+        end
+        if updates.any?
+          begin
+            category.update!(updates)
+          rescue ActiveRecord::RecordInvalid => error
+            raise(
+              "#{error.message} while reconciling Discuz fid=#{row["id"]} " \
+                "current_parent=#{category.parent_category_id.inspect} " \
+                "expected_parent=#{expected_parent_id.inspect}",
+            )
+          end
+          reconciled += 1
+        end
+      end
+    end
+
+    if reconciled.positive?
+      puts "Reconciled names or parent links for #{reconciled} imported Discuz categories"
+    end
+  end
+
+  def restrict_excluded_imported_categories!(rows)
+    excluded_ids =
+      rows.reject { |row| DiscuzCategoryEligibility.importable?(row) }.map { |row| row["id"].to_s }
+    return if excluded_ids.empty?
+
+    imported_categories =
+      CategoryCustomField.where(name: "import_id", value: excluded_ids).pluck(:category_id, :value)
+    return if imported_categories.empty?
+
+    Category.transaction do
+      imported_categories.each do |category_id, source_id|
+        category = Category.find_by(id: category_id)
+        next unless category
+
+        category.set_permissions("staff" => :full)
+        category.save!
+        puts "Restricted excluded Discuz category fid=#{source_id} to staff"
+      end
+    end
+  end
+
   def category_depth(row, rows)
     rows_by_id = @category_rows_by_id ||= rows.index_by { |category| category["id"].to_i }
     depth = 0
@@ -1225,8 +1477,6 @@ class ImportScripts::DiscuzX < ImportScripts::Base
   end
 
   def category_display_names(rows)
-    eligible = rows.reject { |row| row["type"] == "group" || row["status"].to_i == 2 }
-    eligible_ids = eligible.map { |row| row["id"].to_i }.to_set
     existing_imported_ids = CategoryCustomField.where(name: "import_id").select(:category_id)
     reserved_root_names =
       Category
@@ -1235,30 +1485,19 @@ class ImportScripts::DiscuzX < ImportScripts::Base
         .pluck(:name)
         .map { |name| name.to_s.strip[0..49].downcase }
         .to_set
-    grouped =
-      eligible.group_by do |row|
-        parent_id = row["parent_id"].to_i
-        effective_parent = eligible_ids.include?(parent_id) ? parent_id : nil
-        source_name = row["name"].to_s.strip
-        source_name = "Blank" if source_name.empty?
-        [effective_parent, source_name[0..49].downcase]
-      end
+    DiscuzCategoryEligibility.display_names(
+      rows,
+      effective_parent_ids: @category_effective_parent_ids,
+      reserved_root_names: reserved_root_names,
+    )
+  end
 
-    names = {}
-    grouped.each do |(parent_id, base_name), members|
-      collision = members.length > 1 || (parent_id.nil? && reserved_root_names.include?(base_name))
-      members.each do |row|
-        source_name = row["name"].to_s.strip
-        source_name = "Blank" if source_name.empty?
-        source_name = source_name[0..49]
-        if collision
-          suffix = " [DZ #{row["id"]}]"
-          source_name = source_name[0, 50 - suffix.length] + suffix
-        end
-        names[row["id"].to_i] = source_name
-      end
-    end
-    names
+  def imported_category_parent_id(row)
+    source_parent_id = @category_effective_parent_ids[row["id"].to_i]
+    return nil unless source_parent_id
+
+    category_id_from_imported_category_id(source_parent_id) ||
+      raise("importable Discuz parent #{source_parent_id} has no Discourse mapping")
   end
 
   def apply_category_access_fallback(category, row, read_restricted, write_restricted)
@@ -1631,6 +1870,21 @@ class ImportScripts::DiscuzX < ImportScripts::Base
       upload, filename = upload_inline_image data
       upload ? html_for_upload(upload, filename) : nil
     end
+  end
+
+  def process_discuz_category_text(raw)
+    return "" if raw.blank?
+
+    text = process_discuzx_post(raw, nil)
+    if @bbcode_to_md
+      text =
+        begin
+          text.bbcode_to_md(false)
+        rescue StandardError
+          text
+        end
+    end
+    text
   end
 
   def process_discuzx_post(raw, import_id)

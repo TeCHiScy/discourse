@@ -22,8 +22,22 @@ omissions or unmapped identities.
 coverage without selecting post or message bodies. Running it without the flag performs
 the post-import read-only acceptance checks against the local Discourse development
 database. Both scripts reject source/target endpoints outside the pinned loopback lab.
-Source categories receive a staff-only read fallback only when the source excludes
-the Discuz guest group or has an active formula, medal, user-list, or password rule.
+Normal Discuz categories include root rows (type=group) and boards/subboards when
+status is 0 or 1. Circle nodes use status=3 and special rows use status=2; both are
+excluded. If a source hierarchy exceeds Discourse's configured nesting limit, the importer
+places the category under the nearest source ancestor that keeps the target within that
+limit; duplicate names are detected against the resulting target hierarchy. Re-running the
+category stage reconciles imported names and parent links. Mappings from a prior run whose
+source rows are now excluded are kept for review but made staff-only; the importer does not
+delete their categories or content.
+
+For non-test database seeds, this migration checkout creates only the required
+Uncategorized and temporary General categories. It omits Discourse's default Staff and Site
+Feedback categories because they are not part of the imported Discuz forum. The importer
+also keeps its guarded cleanup for already-seeded databases, and the acceptance verifier
+fails if either default category or its active topics remain after import.
+
+Source categories receive a staff-only read fallback only when the source excludes the Discuz guest group or has an active formula, medal, user-list, or password rule.
 Empty serialized formula defaults and allow-lists that include guest group 7 remain
 public. Effective post/reply restrictions become public read-only categories. The
 acceptance report checks each
@@ -62,10 +76,10 @@ unchanged Discourse seed topics for guidelines, welcome, and the admin quick-sta
 topics with user replies or staff edits are preserved. It also removes the untouched,
 unimported `General` seed category only when it has no active topics or children and its
 category definition remains system-authored. Imported or edited categories and categories
-with content are preserved. `Uncategorized`, `Site Feedback`, and `Staff` remain. The
-acceptance report checks locale, Unicode usernames, remaining seed topics, residual unimported `General`
-categories, dangling default category settings, and exact sidebar coverage of imported
-categories, in addition to imported identities and content.
+with content are preserved. `Uncategorized` remains. The acceptance report checks locale, Unicode usernames, remaining
+seed topics, residual unimported `General` categories, dangling default category settings, and
+exact sidebar coverage of imported categories, in addition to imported identities and content.
+It also fails if either untouched `Site Feedback` or `Staff` category remains.
 
 After category import and seed cleanup, the importer sets Discourse's existing
 `default_navigation_menu_categories` site setting to all imported Discuz categories.
@@ -174,3 +188,16 @@ BBCode-to-Markdown conversion is optional in Discourse's upstream importer and i
 is not installed in this lab yet; this rehearsal currently runs without that optional
 converter. Review rendered content before deciding whether to add it to the local tool
 environment.
+
+Discuz forum descriptions are cooked into Discourse's native `Category.description`; forum
+rules are stored in the `discuz_rules` category custom field and edited/rendered by the
+`discourse-discuz-category-rules` plugin. The importer sets Discourse's
+`skip_category_definition` marker before category creation, preventing the automatic
+“About this category” topic. On reconciliation it trashes only an unreplied,
+system-authored definition topic that still has its generated title. The acceptance
+report checks description/rules presence, the skip marker, and that imported categories
+have no linked definition topic.
+
+Discuz category imports require `max_category_nesting=3` (a root category plus two
+subcategory levels). The importer sets this before calculating category parents; the
+acceptance verifier checks the setting and expected hierarchy.

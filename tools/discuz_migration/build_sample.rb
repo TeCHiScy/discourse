@@ -5,6 +5,7 @@ require "fileutils"
 require "json"
 require "mysql2"
 require "time"
+require_relative "category_eligibility"
 
 class DiscuzSampleBuilder
   SHARDS = (0..9).to_a.freeze
@@ -35,9 +36,9 @@ class DiscuzSampleBuilder
     end
     @sample_target_database =
       ENV.fetch("DISCUZX_SAMPLE_TARGET_DATABASE", "discourse_migration_sample")
-    if %w[discourse_migration_sample discourse_migration_sample_uid18_20261013].exclude?(
-         @sample_target_database,
-       )
+    case @sample_target_database
+    when "discourse_migration_sample", "discourse_migration_sample_uid18_20261013"
+    else
       raise "sample target database is not approved"
     end
     @source =
@@ -108,7 +109,7 @@ class DiscuzSampleBuilder
 
     category_ids = query(<<~SQL).map { |row| row["id"].to_i }.sort
       SELECT fid id FROM bbs.forum_forum
-       WHERE type <> 'group' AND status <> 2
+       WHERE #{DiscuzCategoryEligibility.sql_condition}
     SQL
     source_counts = source_counts_snapshot
     shard_counts =
@@ -224,7 +225,7 @@ class DiscuzSampleBuilder
     eligible = <<~SQL
       SELECT t.tid, t.fid FROM bbs.forum_thread t
       JOIN bbs.forum_forum f ON f.fid = t.fid
-      WHERE f.type <> 'group' AND f.status <> 2
+      WHERE #{DiscuzCategoryEligibility.sql_condition("f")}
         AND EXISTS (SELECT 1 FROM bbs.forum_post first_post WHERE first_post.tid = t.tid AND first_post.first = 1)
     SQL
     ids = query(<<~SQL).map { |row| row["tid"].to_i }
@@ -238,7 +239,7 @@ class DiscuzSampleBuilder
         SELECT DISTINCT t.tid FROM bbs.forum_thread t
         JOIN bbs.forum_forum f ON f.fid = t.fid
         JOIN bbs.forum_post p ON p.tid = t.tid
-        WHERE f.type <> 'group' AND f.status <> 2
+        WHERE #{DiscuzCategoryEligibility.sql_condition("f")}
           AND (t.displayorder < 0 OR p.invisible <> 0)
         ORDER BY CRC32(CONCAT('sinofsx-discuz-hidden-v1:', t.tid)), t.tid
         LIMIT #{EDGE_TOPICS_PER_KIND}
@@ -246,7 +247,7 @@ class DiscuzSampleBuilder
       "poll_threads" => <<~SQL,
         SELECT t.tid FROM bbs.forum_thread t
         JOIN bbs.forum_forum f ON f.fid = t.fid
-        WHERE f.type <> 'group' AND f.status <> 2 AND t.special = 1
+        WHERE #{DiscuzCategoryEligibility.sql_condition("f")} AND t.special = 1
         ORDER BY CRC32(CONCAT('sinofsx-discuz-poll-v1:', t.tid)), t.tid
         LIMIT #{EDGE_TOPICS_PER_KIND}
       SQL
@@ -255,7 +256,7 @@ class DiscuzSampleBuilder
         JOIN bbs.forum_forum f ON f.fid = t.fid
         JOIN bbs.forum_post p ON p.tid = t.tid
         JOIN bbs.forum_attachment a ON a.pid = p.pid
-        WHERE f.type <> 'group' AND f.status <> 2
+        WHERE #{DiscuzCategoryEligibility.sql_condition("f")}
         ORDER BY CRC32(CONCAT('sinofsx-discuz-attachment-v1:', t.tid)), t.tid
         LIMIT #{EDGE_TOPICS_PER_KIND}
       SQL
@@ -293,7 +294,7 @@ class DiscuzSampleBuilder
       members: query("SELECT COUNT(*) count FROM (#{member_union}) members").first["count"].to_i,
       categories:
         query(
-          "SELECT COUNT(*) count FROM bbs.forum_forum WHERE type <> 'group' AND status <> 2",
+          "SELECT COUNT(*) count FROM bbs.forum_forum WHERE #{DiscuzCategoryEligibility.sql_condition}",
         ).first[
           "count"
         ].to_i,

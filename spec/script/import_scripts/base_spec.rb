@@ -58,6 +58,61 @@ RSpec.describe ImportScripts::Base do
     expect(SiteSetting.purge_unactivated_users_grace_period_days).to eq(0)
   end
 
+  describe "#create_category" do
+    let(:importer) { described_class.new }
+
+    it "stores category content without creating a definition topic" do
+      category =
+        importer.create_category(
+          {
+            name: "Imported Discuz Category",
+            description: "A short category introduction.",
+            skip_category_definition: true,
+            custom_fields: {
+              "discuz_rules" => "Follow **the rules**.",
+            },
+          },
+          91,
+        )
+
+      expect(category.reload.description).to eq(PrettyText.cook("A short category introduction."))
+      expect(category.topic_id).to be_nil
+      expect(category.custom_fields["discuz_rules"]).to eq("Follow **the rules**.")
+      expect(category.custom_fields[Category::SKIP_DEFINITION_CUSTOM_FIELD]).to eq(true)
+    end
+
+    it "trashes an existing generated definition topic on reconciliation" do
+      category = Fabricate(:category)
+      definition_topic =
+        Fabricate(
+          :topic,
+          category: category,
+          user: Discourse.system_user,
+          title: I18n.t("category.topic_prefix", category: category.name),
+        )
+      Fabricate(:post, topic: definition_topic, user: Discourse.system_user)
+      category.update_column(:topic_id, definition_topic.id)
+      importer.add_category(92, category)
+
+      importer.create_categories([{ id: 92 }]) do |row|
+        {
+          id: row[:id],
+          name: category.name,
+          parent_category_id: category.parent_category_id,
+          description: "Imported description.",
+          skip_category_definition: true,
+          custom_fields: {
+            "discuz_rules" => "Imported rules.",
+          },
+        }
+      end
+
+      expect(category.reload.topic_id).to be_nil
+      expect(definition_topic.reload.deleted_at).to be_present
+      expect(category.custom_fields["discuz_rules"]).to eq("Imported rules.")
+    end
+  end
+
   describe "#create_post" do
     let(:importer) { described_class.new }
     fab!(:user)

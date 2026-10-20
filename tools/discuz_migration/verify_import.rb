@@ -4,6 +4,7 @@
 require "json"
 require "mysql2"
 require_relative "category_permissions"
+require_relative "category_eligibility"
 require_relative "medals"
 require_relative "../../script/import_scripts/base"
 
@@ -205,10 +206,12 @@ class DiscuzImportVerifier
         email_conflict_remaps,
       )
     provenance_report = verify_discuz_provenance(user_imports)
-    site_setup_report = verify_site_setup(category_imports)
+    expected_category_imports =
+      category_imports.select { |source_id, _target_id| source[:category_ids].include?(source_id) }
+    site_setup_report = verify_site_setup(expected_category_imports)
 
-    category_comparison = compare_ids(source[:category_ids], category_imports.keys.to_set)
-    category_content_report = verify_categories(source, category_imports)
+    category_comparison = compare_ids(source[:category_ids], expected_category_imports.keys.to_set)
+    category_content_report = verify_categories(source, expected_category_imports)
     password_report = verify_legacy_password_fields(source, user_imports)
     sample_source_integrity = verify_sample_source_integrity(source)
     medal_report =
@@ -245,6 +248,7 @@ class DiscuzImportVerifier
       category_content_report[:read_restriction_mismatches],
       category_content_report[:permission_mismatches],
       category_content_report[:access_metadata_mismatches],
+      category_content_report[:category_content_failure_count],
       password_report[:failure_count],
       sample_source_integrity[:mismatch_count],
       medal_report&.dig(:acceptance, :failure_count),
@@ -292,7 +296,8 @@ class DiscuzImportVerifier
       },
       site_setup: site_setup_report,
       categories: {
-        imported_id_count: category_imports.length,
+        imported_id_count: expected_category_imports.length,
+        retained_excluded_mapping_count: category_imports.length - expected_category_imports.length,
         id_comparison: category_comparison,
         duplicate_import_id_count: category_duplicate_values.length,
         content_relationships: category_content_report,
@@ -786,10 +791,12 @@ class DiscuzImportVerifier
         email_conflict_remaps,
       )
     provenance_report = verify_discuz_provenance(user_imports)
-    site_setup_report = verify_site_setup(category_imports)
+    expected_category_imports =
+      category_imports.select { |source_id, _target_id| source[:category_ids].include?(source_id) }
+    site_setup_report = verify_site_setup(expected_category_imports)
 
-    category_comparison = compare_ids(source[:category_ids], category_imports.keys.to_set)
-    category_content_report = verify_categories(source, category_imports)
+    category_comparison = compare_ids(source[:category_ids], expected_category_imports.keys.to_set)
+    category_content_report = verify_categories(source, expected_category_imports)
     post_report = verify_posts(source, user_imports, category_imports)
     pm_report = verify_private_messages(source, user_imports, pm_posts, pm_duplicate_values)
     password_report = verify_legacy_password_fields(source, user_imports)
@@ -816,6 +823,7 @@ class DiscuzImportVerifier
       category_content_report[:read_restriction_mismatches],
       category_content_report[:permission_mismatches],
       category_content_report[:access_metadata_mismatches],
+      category_content_report[:category_content_failure_count],
       post_report[:failure_count],
       pm_report[:failure_count],
       password_report[:failure_count],
@@ -842,7 +850,8 @@ class DiscuzImportVerifier
       },
       site_setup: site_setup_report,
       categories: {
-        imported_id_count: category_imports.length,
+        imported_id_count: expected_category_imports.length,
+        retained_excluded_mapping_count: category_imports.length - expected_category_imports.length,
         id_comparison: category_comparison,
         duplicate_import_id_count: category_duplicate_values.length,
         content_relationships: category_content_report,
@@ -924,7 +933,7 @@ class DiscuzImportVerifier
     SQL
     category_ids =
       category_rows
-        .reject { |row| row["type"] == "group" || row["status"].to_i == 2 }
+        .select { |row| DiscuzCategoryEligibility.importable?(row) }
         .map { |row| row["id"].to_s }
         .to_set
     pm_rows = rows(pm_message_union_sql)
@@ -950,8 +959,12 @@ class DiscuzImportVerifier
   end
 
   def verify_categories(source, category_imports)
-    source_rows =
-      source[:category_rows].reject { |row| row["type"] == "group" || row["status"].to_i == 2 }
+    source_rows = source[:category_rows].select { |row| DiscuzCategoryEligibility.importable?(row) }
+    effective_parent_ids =
+      DiscuzCategoryEligibility.effective_parent_ids(
+        source[:category_rows],
+        max_nesting: DiscuzCategoryEligibility::MAX_CATEGORY_NESTING,
+      )
     source_read_restricted =
       DiscuzCategoryPermissions.source_category_read_restrictions(
         source[:category_rows],
@@ -960,18 +973,34 @@ class DiscuzImportVerifier
     target_rows =
       Category
         .where(id: category_imports.values)
-        .pluck(:id, :name, :parent_category_id, :read_restricted)
-        .to_h do |id, name, parent_id, read_restricted|
-          [id, { name: name, parent_id: parent_id, read_restricted: read_restricted }]
+        .pluck(:id, :name, :parent_category_id, :read_restricted, :description, :topic_id)
+        .to_h do |id, name, parent_id, read_restricted, description, topic_id|
+          [
+            id,
+            {
+              name: name,
+              parent_id: parent_id,
+              read_restricted: read_restricted,
+              description: description,
+              topic_id: topic_id,
+            },
+          ]
         end
+    content_field_names = %w[discuz_rules skip_category_definition]
+    content_fields =
+      CategoryCustomField
+        .where(category_id: category_imports.values, name: content_field_names)
+        .pluck(:category_id, :name, :value)
+        .to_h { |category_id, name, value| [[category_id, name], value] }
     permission_rows =
-      CategoryGroup
-        .joins(:group)
-        .where(category_id: category_imports.values)
-        .pluck(:category_id, "groups.name", :permission_type)
+      CategoryGroup.where(category_id: category_imports.values).pluck(
+        :category_id,
+        :group_id,
+        :permission_type,
+      )
     target_permissions = Hash.new { |hash, key| hash[key] = {} }
-    permission_rows.each do |category_id, group_name, permission_type|
-      target_permissions[category_id][group_name] = permission_type
+    permission_rows.each do |category_id, group_id, permission_type|
+      target_permissions[category_id][group_id] = permission_type
     end
     access_field_names = %w[
       discuz_viewperm_configured
@@ -993,6 +1022,18 @@ class DiscuzImportVerifier
     read_restriction_mismatch_ids = []
     permission_mismatches = 0
     access_metadata_mismatches = 0
+    category_nesting_setting_mismatches =
+      (
+        if SiteSetting.max_category_nesting.to_i == DiscuzCategoryEligibility::MAX_CATEGORY_NESTING
+          0
+        else
+          1
+        end
+      )
+    description_presence_mismatches = 0
+    rules_presence_mismatches = 0
+    skip_definition_marker_mismatches = 0
+    category_definition_topic_ids = []
     restricted_categories = 0
     write_restricted_categories = 0
     categories_with_user_view_overrides = 0
@@ -1006,7 +1047,15 @@ class DiscuzImportVerifier
 
       expected_name = expected_names[row["id"].to_i]
       name_mismatches += 1 if target[:name] != expected_name
-      expected_parent = category_imports[row["parent_id"].to_s] if row["parent_id"].to_i.positive?
+      description_presence_mismatches += 1 if target[:description].present? !=
+        row["description"].present?
+      rules_value = content_fields[[category_id, "discuz_rules"]]
+      rules_presence_mismatches += 1 if rules_value.present? != row["rules"].present?
+      skip_marker = content_fields[[category_id, "skip_category_definition"]]
+      skip_definition_marker_mismatches += 1 unless truthy_field?(skip_marker)
+      category_definition_topic_ids << category_id if target[:topic_id].present?
+      effective_parent_id = effective_parent_ids[row["id"].to_i]
+      expected_parent = category_imports[effective_parent_id.to_s] if effective_parent_id
       parent_mismatches += 1 if target[:parent_id] != expected_parent
 
       read_restricted = source_read_restricted[row["id"].to_i]
@@ -1018,10 +1067,13 @@ class DiscuzImportVerifier
       expected_permissions =
         if read_restricted
           restricted_categories += 1
-          { "staff" => full_permission }
+          { Group::AUTO_GROUPS[:staff] => full_permission }
         elsif write_restricted
           write_restricted_categories += 1
-          { "everyone" => readonly_permission, "staff" => full_permission }
+          {
+            Group::AUTO_GROUPS[:everyone] => readonly_permission,
+            Group::AUTO_GROUPS[:staff] => full_permission,
+          }
         else
           {}
         end
@@ -1044,13 +1096,25 @@ class DiscuzImportVerifier
       end
     end
 
+    category_content_failure_count =
+      category_nesting_setting_mismatches + description_presence_mismatches +
+        rules_presence_mismatches + skip_definition_marker_mismatches +
+        category_definition_topic_ids.length
+
     {
       name_mismatches: name_mismatches,
       parent_mismatches: parent_mismatches,
+      description_presence_mismatches: description_presence_mismatches,
+      rules_presence_mismatches: rules_presence_mismatches,
+      skip_definition_marker_mismatches: skip_definition_marker_mismatches,
+      category_definition_topic_count: category_definition_topic_ids.length,
+      category_definition_topic_ids: category_definition_topic_ids,
+      category_content_failure_count: category_content_failure_count,
       read_restriction_mismatches: read_restriction_mismatches,
       read_restriction_mismatch_ids: read_restriction_mismatch_ids,
       permission_mismatches: permission_mismatches,
       access_metadata_mismatches: access_metadata_mismatches,
+      category_nesting_setting_mismatches: category_nesting_setting_mismatches,
       source_restricted_categories: restricted_categories,
       source_write_restricted_categories: write_restricted_categories,
       categories_with_user_view_overrides: categories_with_user_view_overrides,
@@ -1076,7 +1140,7 @@ class DiscuzImportVerifier
       "members" => scalar("SELECT COUNT(*) count FROM (#{member_union}) members"),
       "categories" =>
         scalar(
-          "SELECT COUNT(*) count FROM #{bbs("forum_forum")} WHERE type <> 'group' AND status <> 2",
+          "SELECT COUNT(*) count FROM #{bbs("forum_forum")} WHERE #{DiscuzCategoryEligibility.sql_condition}",
         ),
       "threads" => scalar("SELECT COUNT(*) count FROM #{bbs("forum_thread")}"),
       "posts" => scalar("SELECT COUNT(*) count FROM #{bbs("forum_post")}"),
@@ -1150,8 +1214,6 @@ class DiscuzImportVerifier
   end
 
   def expected_category_names(source_rows)
-    eligible = source_rows.reject { |row| row["type"] == "group" || row["status"].to_i == 2 }
-    eligible_ids = eligible.map { |row| row["id"].to_i }.to_set
     existing_imported_ids = CategoryCustomField.where(name: "import_id").select(:category_id)
     reserved_root_names =
       Category
@@ -1160,27 +1222,16 @@ class DiscuzImportVerifier
         .pluck(:name)
         .map { |name| name.to_s.strip[0..49].downcase }
         .to_set
-    groups =
-      eligible.group_by do |row|
-        parent_id = row["parent_id"].to_i
-        parent_id = nil if eligible_ids.exclude?(parent_id)
-        name = row["name"].to_s.strip
-        name = "Blank" if name.empty?
-        [parent_id, name[0..49].downcase]
-      end
-    groups.each_with_object({}) do |((parent_id, base_name), rows), expected|
-      collision = rows.length > 1 || (parent_id.nil? && reserved_root_names.include?(base_name))
-      rows.each do |row|
-        name = row["name"].to_s.strip
-        name = "Blank" if name.empty?
-        name = name[0..49]
-        if collision
-          suffix = " [DZ #{row["id"]}]"
-          name = name[0, 50 - suffix.length] + suffix
-        end
-        expected[row["id"].to_i] = name
-      end
-    end
+    effective_parent_ids =
+      DiscuzCategoryEligibility.effective_parent_ids(
+        source_rows,
+        max_nesting: DiscuzCategoryEligibility::MAX_CATEGORY_NESTING,
+      )
+    DiscuzCategoryEligibility.display_names(
+      source_rows,
+      effective_parent_ids: effective_parent_ids,
+      reserved_root_names: reserved_root_names,
+    )
   end
 
   def truthy_field?(value)
@@ -1300,7 +1351,7 @@ class DiscuzImportVerifier
   end
 
   def category_access_metrics(rows, medals_enabled:)
-    candidates = rows.reject { |row| row["type"] == "group" || row["status"].to_i == 2 }
+    candidates = rows.select { |row| DiscuzCategoryEligibility.importable?(row) }
     restricted = DiscuzCategoryPermissions.source_category_read_restrictions(rows, medals_enabled:)
     {
       effective_read_restricted: candidates.count { |row| restricted[row["id"].to_i] },
@@ -1904,6 +1955,24 @@ class DiscuzImportVerifier
         end
     missing_general_setting_target =
       general_setting_id.positive? && !Category.exists?(id: general_setting_id)
+    default_forum_category_setting_ids =
+      %w[meta_category_id staff_category_id].to_h do |setting_name|
+        [setting_name, SiteSetting.get(setting_name).to_i]
+      end
+    default_forum_category_ids =
+      default_forum_category_setting_ids.values.select(&:positive?).to_set
+    remaining_default_forum_categories =
+      Category
+        .where(id: default_forum_category_ids.to_a)
+        .order(:id)
+        .pluck(:id, :name, :slug)
+        .map { |id, name, slug| { id: id, name: name, slug: slug } }
+    active_topics_in_default_forum_categories =
+      Topic
+        .where(category_id: default_forum_category_ids.to_a)
+        .order(:id)
+        .pluck(:id, :title, :category_id)
+        .map { |id, title, category_id| { id: id, title: title, category_id: category_id } }
     retained_system_category_settings =
       %w[uncategorized_category_id meta_category_id staff_category_id].to_h do |setting_name|
         category_id = SiteSetting.get(setting_name).to_i
@@ -1931,6 +2000,8 @@ class DiscuzImportVerifier
     failure_count =
       (locale_matches ? 0 : 1) + (unicode_usernames_enabled ? 0 : 1) +
         remaining_seed_topics.length + unimported_general_categories.length +
+        remaining_default_forum_categories.length +
+        active_topics_in_default_forum_categories.length +
         (missing_general_setting_target ? 1 : 0) + (missing_default_composer_category ? 1 : 0) +
         missing_default_navigation_category_ids.length +
         (default_sidebar_categories_match_imports ? 0 : 1)
@@ -1943,6 +2014,12 @@ class DiscuzImportVerifier
       expected_unicode_usernames_enabled: true,
       remaining_default_seed_topics: remaining_seed_topics,
       retained_system_category_settings: retained_system_category_settings,
+      default_forum_category_setting_ids: default_forum_category_setting_ids,
+      remaining_default_forum_categories: remaining_default_forum_categories,
+      active_topics_in_default_forum_categories: active_topics_in_default_forum_categories,
+      required_default_forum_categories_absent:
+        remaining_default_forum_categories.empty? &&
+          active_topics_in_default_forum_categories.empty?,
       unimported_general_categories: unimported_general_categories,
       general_category_setting_id: general_setting_id,
       default_composer_category_id: default_composer_category_id,
@@ -1953,6 +2030,8 @@ class DiscuzImportVerifier
       missing_imported_sidebar_category_ids: missing_imported_sidebar_category_ids.to_a.sort,
       unexpected_sidebar_category_ids: unexpected_sidebar_category_ids.to_a.sort,
       default_sidebar_categories_match_imports: default_sidebar_categories_match_imports,
+      default_category_cleanup_policy:
+        "remove untouched Site Feedback and Staff seed categories before importing Discuz categories; retain their positive setting IDs as tombstones to prevent reseeding",
       general_category_cleanup_policy:
         "remove only an untouched, unimported General seed category with no active topics or children; preserve edited, imported, or content-bearing categories",
       failure_count: failure_count,

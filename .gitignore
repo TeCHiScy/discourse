@@ -31,6 +31,7 @@
 /plugins/*
 !/plugins/discourse-discuz-bbcode
 !/plugins/discourse-discuz-legacy-auth
+!/plugins/discourse-discuz-category-rules
 !/plugins/discourse-discuz-medals
 !/plugins/discourse-sinofsx-aviation
 !/plugins/discourse-details

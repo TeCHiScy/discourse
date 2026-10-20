@@ -431,7 +431,8 @@ class ImportScripts::Base
       params = yield(c)
 
       # block returns nil to skip
-      if params.nil? || category_id_from_imported_category_id(params[:id])
+      already_imported = category_id_from_imported_category_id(params[:id]) if params
+      if params.nil? || (already_imported && !params[:skip_category_definition])
         skipped += 1
       else
         # Basic massaging on the category name
@@ -439,7 +440,7 @@ class ImportScripts::Base
         params[:name] = params[:name].strip
         params[:name] = params[:name][0..49]
 
-        # make sure categories don't go more than 2 levels deep
+        # Keep categories within the configured nesting limit.
         if params[:parent_category_id]
           top = Category.find_by_id(params[:parent_category_id])
           top = top.parent_category while (top&.height_of_ancestors || -1) + 1 >=
@@ -460,7 +461,11 @@ class ImportScripts::Base
   end
 
   def create_category(opts, import_id)
-    existing =
+    imported_category_id = category_id_from_imported_category_id(import_id) if opts[
+      :skip_category_definition
+    ] && import_id
+    existing = Category.find_by(id: imported_category_id) if imported_category_id
+    existing ||=
       Category
         .where(parent_category_id: opts[:parent_category_id])
         .where("LOWER(name) = ?", opts[:name].downcase.strip)
@@ -474,11 +479,23 @@ class ImportScripts::Base
         add_category(import_id, existing)
       end
 
+      if opts[:skip_category_definition]
+        existing.skip_category_definition = true
+        existing.description = PrettyText.cook(opts[:description].to_s)
+        existing.custom_fields[Category::SKIP_DEFINITION_CUSTOM_FIELD] = true
+        (opts[:custom_fields] || {}).each { |field, value| existing.custom_fields[field] = value }
+        existing.save!
+        existing.save_custom_fields
+        discard_category_definition_topic(existing)
+      end
+
       return existing
     end
 
     post_create_action = opts.delete(:post_create_action)
+    skip_category_definition = opts[:skip_category_definition]
 
+    category_description = PrettyText.cook(opts[:description].to_s) if skip_category_definition
     new_category =
       Category.new(
         name: opts[:name],
@@ -488,12 +505,19 @@ class ImportScripts::Base
         color: opts[:color] || category_color(opts[:parent_category_id]),
         text_color: opts[:text_color] || "FFFFFF",
         read_restricted: opts[:read_restricted] || false,
+        description: category_description,
       )
 
+    new_category.skip_category_definition = true if skip_category_definition
     new_category.custom_fields["import_id"] = import_id if import_id
+    if skip_category_definition
+      new_category.custom_fields[Category::SKIP_DEFINITION_CUSTOM_FIELD] = true
+      (opts[:custom_fields] || {}).each { |field, value| new_category.custom_fields[field] = value }
+    end
     new_category.save!
+    new_category.save_custom_fields if skip_category_definition
 
-    if opts[:description].present?
+    if opts[:description].present? && !skip_category_definition
       changes = { raw: opts[:description] }
       opts = { skip_revision: true, skip_validations: true, bypass_bump: true }
       new_category.topic.first_post.revise(Discourse.system_user, changes, opts)
@@ -504,6 +528,21 @@ class ImportScripts::Base
     post_create_action.try(:call, new_category)
 
     new_category
+  end
+
+  def discard_category_definition_topic(category)
+    topic = category.topic
+    return unless topic
+    return unless topic.user_id == Discourse::SYSTEM_USER_ID && topic.posts.count == 1
+
+    expected_title = I18n.t("category.topic_prefix", category: category.name)
+    return unless topic.title == expected_title
+
+    Category.transaction do
+      topic.trash!(Discourse.system_user)
+      category.update_column(:topic_id, nil)
+    end
+    puts "Removed generated category definition topic ##{topic.id}"
   end
 
   def category_color(parent_category_id)
