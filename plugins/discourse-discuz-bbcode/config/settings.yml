@@ -1,0 +1,4 @@
+plugins:
+  discourse_discuz_bbcode_tables_enabled:
+    default: true
+    client: true
