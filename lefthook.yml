@@ -25,11 +25,11 @@ pre-commit:
         - "**/*.{rb,rake,thor}"
         - "bin/**/*"
         - "Gemfile"
-      run: bundle exec rubocop --force-exclusion {staged_files}
+      run: RBENV_VERSION=3.4.7 rbenv exec bundle exec rubocop --force-exclusion {staged_files}
     syntax_tree:
       exclude: *ruby_exclude
       glob: *ruby_glob
-      run: bundle exec stree check Gemfile {staged_files}
+      run: RBENV_VERSION=3.4.7 rbenv exec bundle exec stree check Gemfile {staged_files}
     prettier:
       glob: &prettier_glob
         - "app/assets/stylesheets/**/*.{css,scss}"
@@ -55,10 +55,10 @@ pre-commit:
       glob: &yaml_glob "**/*.{yaml,yml}"
       # database.yml is an erb file not a yaml file
       exclude: &yaml_exclude "config/database.yml"
-      run: bundle exec yaml-lint {staged_files}
+      run: RBENV_VERSION=3.4.7 rbenv exec bundle exec yaml-lint {staged_files}
     i18n-lint:
       glob: &i18n_glob "**/{client,server}.en.yml"
-      run: bundle exec ruby script/i18n_lint.rb {staged_files}
+      run: RBENV_VERSION=3.4.7 rbenv exec bundle exec ruby script/i18n_lint.rb {staged_files}
     stylelint:
       glob: &stylelint_glob
         - "app/assets/stylesheets/**/*.scss"
@@ -85,11 +85,11 @@ fix-staged:
     rubocop:
       exclude: *ruby_exclude
       glob: *ruby_glob
-      run: bundle exec rubocop --force-exclusion -A {staged_files}
+      run: RBENV_VERSION=3.4.7 rbenv exec bundle exec rubocop --force-exclusion -A {staged_files}
     syntax_tree:
       exclude: *ruby_exclude
       glob: *ruby_glob
-      run: bundle exec stree write Gemfile {staged_files}
+      run: RBENV_VERSION=3.4.7 rbenv exec bundle exec stree write Gemfile {staged_files}
 
 # Working-tree counterparts of pre-commit/fix-staged. Deliberately NOT named
 # pre-commit/pre-push so lefthook does not hide unstaged changes: the linters
@@ -105,12 +105,12 @@ lint-files:
       files: &working_tree_files git ls-files --cached --others --exclude-standard
       exclude: *ruby_exclude
       glob: *ruby_glob
-      run: bundle exec rubocop --force-exclusion {files}
+      run: RBENV_VERSION=3.4.7 rbenv exec bundle exec rubocop --force-exclusion {files}
     syntax_tree:
       files: *working_tree_files
       exclude: *ruby_exclude
       glob: *ruby_glob
-      run: bundle exec stree check Gemfile {files}
+      run: RBENV_VERSION=3.4.7 rbenv exec bundle exec stree check Gemfile {files}
     prettier:
       files: *working_tree_files
       glob: *prettier_glob
@@ -128,11 +128,11 @@ lint-files:
       files: *working_tree_files
       glob: *yaml_glob
       exclude: *yaml_exclude
-      run: bundle exec yaml-lint {files}
+      run: RBENV_VERSION=3.4.7 rbenv exec bundle exec yaml-lint {files}
     i18n-lint:
       files: *working_tree_files
       glob: *i18n_glob
-      run: bundle exec ruby script/i18n_lint.rb {files}
+      run: RBENV_VERSION=3.4.7 rbenv exec bundle exec ruby script/i18n_lint.rb {files}
     stylelint:
       files: *working_tree_files
       glob: *stylelint_glob
@@ -162,12 +162,12 @@ fix-files:
       files: *working_tree_files
       exclude: *ruby_exclude
       glob: *ruby_glob
-      run: bundle exec rubocop --force-exclusion -A {files}
+      run: RBENV_VERSION=3.4.7 rbenv exec bundle exec rubocop --force-exclusion -A {files}
     syntax_tree:
       files: *working_tree_files
       exclude: *ruby_exclude
       glob: *ruby_glob
-      run: bundle exec stree write Gemfile {files}
+      run: RBENV_VERSION=3.4.7 rbenv exec bundle exec stree write Gemfile {files}
 
 fix-all:
   parallel: false
@@ -179,22 +179,22 @@ fix-all:
     stylelint:
       run: pnpm lint:css:fix
     rubocop:
-      run: bundle exec rubocop --force-exclusion -A
+      run: RBENV_VERSION=3.4.7 rbenv exec bundle exec rubocop --force-exclusion -A
     syntax_tree:
       exclude: *ruby_exclude
       glob: *ruby_glob
-      run: bundle exec stree write Gemfile {all_files}
+      run: RBENV_VERSION=3.4.7 rbenv exec bundle exec stree write Gemfile {all_files}
 
 lints:
   parallel: true
   commands:
     rubocop:
       glob: *ruby_glob
-      run: bundle exec rubocop
+      run: RBENV_VERSION=3.4.7 rbenv exec bundle exec rubocop
     syntax_tree:
       exclude: *ruby_exclude
       glob: *ruby_glob
-      run: bundle exec stree check Gemfile {all_files}
+      run: RBENV_VERSION=3.4.7 rbenv exec bundle exec stree check Gemfile {all_files}
     prettier:
       run: pnpm lint:prettier
     eslint:
@@ -205,9 +205,9 @@ lints:
       glob: *yaml_glob
       # database.yml is an erb file not a yaml file
       exclude: *yaml_exclude
-      run: bundle exec yaml-lint {all_files}
+      run: RBENV_VERSION=3.4.7 rbenv exec bundle exec yaml-lint {all_files}
     i18n-lint:
       glob: *i18n_glob
-      run: bundle exec ruby script/i18n_lint.rb {all_files}
+      run: RBENV_VERSION=3.4.7 rbenv exec bundle exec ruby script/i18n_lint.rb {all_files}
     glint:
       run: pnpm lint:types
