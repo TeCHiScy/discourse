@@ -6,6 +6,7 @@ require "mysql2"
 require_relative "category_permissions"
 require_relative "category_eligibility"
 require_relative "medals"
+require_relative "smilies"
 require_relative "../../script/import_scripts/base"
 
 class DiscuzImportVerifier
@@ -922,7 +923,7 @@ class DiscuzImportVerifier
       scalar("SELECT COUNT(*) count FROM #{bbs("forum_medal")} WHERE available = 1") > 0
     category_rows = rows(<<~SQL)
       SELECT f.fid id, f.fup parent_id, f.name, f.type, f.status,
-             d.viewperm, d.formulaperm, d.password forum_password,
+             d.description, d.rules, d.viewperm, d.formulaperm, d.password forum_password,
              d.postperm, d.replyperm,
              EXISTS (
                SELECT 1 FROM #{bbs("forum_access")} access
@@ -1374,6 +1375,8 @@ class DiscuzImportVerifier
     hidden_source_count = 0
     hidden_public_count = 0
     hidden_public_posts = []
+    unconverted_smiley_source_ids = []
+    smiley_conversion_mismatch_count = 0
     relation_mismatches = Hash.new(0)
     target_topic_by_source_root = {}
     source_row_count = 0
@@ -1403,6 +1406,8 @@ class DiscuzImportVerifier
         state_mismatch_count += counts.delete(:state_mismatch_count)
         hidden_public_count += counts.delete(:hidden_public_count)
         hidden_public_posts.concat(counts.delete(:hidden_public_posts))
+        smiley_conversion_mismatch_count += counts.delete(:smiley_conversion_mismatch_count)
+        unconverted_smiley_source_ids.concat(counts.delete(:unconverted_smiley_source_ids))
         counts.each { |name, count| relation_mismatches[name] += count }
         batch.clear
       end
@@ -1414,6 +1419,8 @@ class DiscuzImportVerifier
       state_mismatch_count += counts.delete(:state_mismatch_count)
       hidden_public_count += counts.delete(:hidden_public_count)
       hidden_public_posts.concat(counts.delete(:hidden_public_posts))
+      smiley_conversion_mismatch_count += counts.delete(:smiley_conversion_mismatch_count)
+      unconverted_smiley_source_ids.concat(counts.delete(:unconverted_smiley_source_ids))
       counts.each { |name, count| relation_mismatches[name] += count }
     end
 
@@ -1445,6 +1452,7 @@ class DiscuzImportVerifier
       comparison[:duplicate_source_import_id_count],
       state_mismatch_count,
       hidden_public_count,
+      smiley_conversion_mismatch_count,
       *relation_mismatches.values,
     ]
 
@@ -1458,6 +1466,8 @@ class DiscuzImportVerifier
       hidden_or_deleted_source_posts: hidden_source_count,
       hidden_or_deleted_posts_still_public: hidden_public_count,
       hidden_public_posts: hidden_public_posts,
+      unconverted_discuz_smiley_count: smiley_conversion_mismatch_count,
+      unconverted_discuz_smiley_source_ids: unconverted_smiley_source_ids.first(100),
       author_mismatches: relation_mismatches[:author_mismatches],
       topic_category_mismatches: relation_mismatches[:topic_category_mismatches],
       source_thread_mismatches: relation_mismatches[:source_thread_mismatches],
@@ -1482,7 +1492,7 @@ class DiscuzImportVerifier
     ids = batch.map { |record| record[:id] }.uniq
     sql_ids = ids.map { |id| ActiveRecord::Base.connection.quote(id.to_s) }.join(",")
     sql = <<~SQL
-      SELECT id_field.value import_id, p.deleted_at, p.topic_id, p.user_id,
+      SELECT id_field.value import_id, p.deleted_at, p.topic_id, p.user_id, p.raw,
              EXTRACT(EPOCH FROM p.created_at)::bigint created_epoch,
              t.category_id,
              invisible_field.value discuz_invisible,
@@ -1508,6 +1518,8 @@ class DiscuzImportVerifier
     topic_category_mismatches = 0
     source_thread_mismatches = 0
     created_at_mismatches = 0
+    smiley_conversion_mismatch_count = 0
+    unconverted_smiley_source_ids = []
 
     batch.each do |record|
       target_rows = imported_by_id[record[:id]] || []
@@ -1519,6 +1531,11 @@ class DiscuzImportVerifier
 
         target = target_rows.first
         source = record[:source]
+        target_raw = target["raw"].to_s
+        if DiscuzMigration::Smilies.convert(target_raw) != target_raw
+          smiley_conversion_mismatch_count += 1
+          unconverted_smiley_source_ids << record[:id] if unconverted_smiley_source_ids.length < 100
+        end
         state_mismatch_count += 1 if target["discuz_invisible"].to_i != source["invisible"].to_i ||
           target["discuz_thread_displayorder"].to_i != source["thread_status"].to_i
         if record[:hidden] && target["deleted_at"].nil?
@@ -1562,6 +1579,8 @@ class DiscuzImportVerifier
       topic_category_mismatches: topic_category_mismatches,
       source_thread_mismatches: source_thread_mismatches,
       created_at_mismatches: created_at_mismatches,
+      smiley_conversion_mismatch_count: smiley_conversion_mismatch_count,
+      unconverted_smiley_source_ids: unconverted_smiley_source_ids,
     }
   end
 

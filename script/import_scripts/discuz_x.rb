@@ -16,6 +16,7 @@ require_relative "base"
 require_relative "../../tools/discuz_migration/category_permissions"
 require_relative "../../tools/discuz_migration/category_eligibility"
 require_relative "../../tools/discuz_migration/medals"
+require_relative "../../tools/discuz_migration/smilies"
 
 class ImportScripts::DiscuzX < ImportScripts::Base
   DISCUZX_DB = ENV.fetch("DISCUZX_DB", "bbs")
@@ -24,6 +25,20 @@ class ImportScripts::DiscuzX < ImportScripts::Base
   DB_HOST = ENV.fetch("DISCUZX_DB_HOST", "127.0.0.1")
   DB_PORT = Integer(ENV.fetch("DISCUZX_DB_PORT", "13306"))
   BATCH_SIZE = 1000
+  DISCUZ_QUOTE_TAG = %r{\[/?quote(?:=[^\]]*)?\]}i
+  DISCUZ_QUOTE_HEADER =
+    %r{
+    \A[ \t]*
+    (?:\[size=[^\]]+\])?\s*
+    (?:\[url=[^\]]+\])?\s*
+    \[color=[^\]]+\]
+    (?<label>[^\[\]]*?发表于[^\[\]]*)
+    \[/color\]
+    (?:\[/url\])?
+    (?:[ \t]*\[url=[^\]]+\][^\[]*\[/url\])?
+    (?:\[/size\])?
+    [ \t]*(?:\r?\n)?
+  }ix
   DISCUZ_SOURCE = "discuz_x3.5"
   ORIGINAL_SITE_PREFIX = ENV.fetch("DISCUZX_ORIGINAL_SITE_PREFIX", "bbs.sinofsx.org")
   NEW_SITE_PREFIX = ENV.fetch("DISCUZX_NEW_SITE_PREFIX", "http://127.0.0.1:3000")
@@ -1905,33 +1920,7 @@ class ImportScripts::DiscuzX < ImportScripts::Base
         "",
       ).strip
 
-    s.gsub!(%r{\[quote\](.*)?\[/quote\]}im) do |matched|
-      content = $1
-      post_import_id = find_post_id_by_quote_number(content)
-      if post_import_id
-        post_id = post_id_from_imported_post_id(post_import_id.to_i)
-        if (post = Post.find_by(id: post_id))
-          "[quote=\"#{post.user.username}\", post: #{post.post_number}, topic: #{post.topic_id}]\n#{content}\n[/quote]"
-        else
-          puts "post #{import_id} quote to not exists post #{post_import_id}, skip reply"
-          matched[0]
-        end
-      else
-        matched[0]
-      end
-    end
-
-    s.gsub!(
-      %r{\[size=2\]\[color=#999999\].*? 发表于 [\d\-\: ]*\[/color\] \[url=forum.php\?mod=redirect&goto=findpost&pid=\d+&ptid=\d+\].*?\[/url\]\[/size\]}i,
-      "",
-    )
-    s.gsub!(
-      %r{\[size=2\]\[color=#999999\].*? 发表于 [\d\-\: ]*\[/color\] \[url=https?://#{ORIGINAL_SITE_PREFIX}/redirect.php\?goto=findpost&pid=\d+&ptid=\d+\].*?\[/url\]\[/size\]}i,
-      "",
-    )
-
-    # convert quote
-    s.gsub!(%r{\[quote\](.*?)\[/quote\]}m) { "\n" + $1.strip.gsub(/^/, "> ") + "\n" }
+    s = convert_discuz_quotes(s, import_id)
 
     # truncate line space, preventing line starting with many blanks to be parsed as code blocks
     s.gsub!(/^ {4,}/, "   ")
@@ -2009,9 +1998,8 @@ class ImportScripts::DiscuzX < ImportScripts::Base
     # example: 本帖最后由 Helloworld 于 2015-1-28 22:05 编辑
     s.gsub!(%r{\[i=s\] 本帖最后由[\s\S]*?编辑 \[/i\]}, "")
 
-    # Convert the custom smileys to emojis
-    # `{:cry:}` to `:cry`
-    s.gsub!(/\{(\:\S*?\:)\}/, '\1')
+    # Convert reviewed Discuz smileys and preserve unreviewed numeric tokens.
+    s = DiscuzMigration::Smilies.convert(s)
 
     # Replace internal forum links that aren't in the <!-- l --> format
     # convert list tags to ul and list=1 tags to ol
@@ -2695,16 +2683,127 @@ class ImportScripts::DiscuzX < ImportScripts::Base
     end
   end
 
-  # post id is in the quote block
+  # post id is in the Discuz quote attribution URL
   def find_post_id_by_quote_number(raw)
-    case raw
-    when /\[url=forum.php\?mod=redirect&goto=findpost&pid=(\d+)&ptid=\d+\]/ #standard
-      $1
-    when %r{\[url=https?://#{ORIGINAL_SITE_PREFIX}/redirect.php\?goto=findpost&pid=(\d+)&ptid=\d+\]} # old discuz 7 format
-      $1
-    when %r{\[quote\][\S\s]*pid=(\d+)[\S\s]*\[/quote\]} # quote
-      $1
+    raw
+      .scan(/\[url=([^\]]+)\]/i)
+      .each do |(url)|
+        normalized_url = url.gsub(/&amp;/i, "&")
+        path, query = normalized_url.split("?", 2)
+        next unless query
+        unless path.match?(
+                 %r{\A(?:https?://#{Regexp.escape(ORIGINAL_SITE_PREFIX)})?/?(?:forum\.php|redirect\.php)\z}i,
+               )
+          next
+        end
+
+        parameters =
+          query
+            .split("&")
+            .each_with_object({}) do |parameter, values|
+              key, value = parameter.split("=", 2)
+              values[key] = value
+            end
+        next unless parameters["goto"] == "findpost"
+        next unless parameters["pid"].to_s.match?(/\A\d+\z/)
+        next unless parameters["ptid"].to_s.match?(/\A\d+\z/)
+
+        return parameters["pid"]
+      end
+
+    nil
+  end
+
+  def convert_discuz_quotes(raw, import_id)
+    root = { children: [] }
+    stack = [root]
+    cursor = 0
+
+    while (match = DISCUZ_QUOTE_TAG.match(raw, cursor))
+      stack.last[:children] << raw[cursor...match.begin(0)] if match.begin(0) > cursor
+      tag = match[0]
+
+      if tag.match?(%r{\A\[/quote\]\z}i)
+        if stack.length > 1
+          stack.pop[:closed] = true
+        else
+          stack.last[:children] << tag
+        end
+      else
+        quote = { open_tag: tag, children: [], closed: false }
+        stack.last[:children] << quote
+        stack << quote
+      end
+
+      cursor = match.end(0)
     end
+
+    stack.last[:children] << raw[cursor..] if cursor < raw.length
+    render_discuz_quote_children(root[:children], import_id)
+  end
+
+  def render_discuz_quote_children(children, import_id)
+    children
+      .map do |child|
+        if child.is_a?(Hash)
+          render_discuz_quote(child, import_id)
+        else
+          child
+        end
+      end
+      .join
+  end
+
+  def render_discuz_quote(quote, import_id)
+    inner = render_discuz_quote_children(quote[:children], import_id)
+    return "#{quote[:open_tag]}#{inner}" unless quote[:closed]
+    return "#{quote[:open_tag]}#{inner}[/quote]" unless quote[:open_tag].casecmp?("[quote]")
+
+    attribution = extract_discuz_quote_attribution(inner)
+    body = attribution[:body].strip
+    post_import_id = attribution[:post_import_id]
+
+    if post_import_id
+      post_id = post_id_from_imported_post_id(post_import_id.to_i)
+      post = Post.find_by(id: post_id) if post_id
+
+      if post
+        quote_header =
+          "[quote=\"#{post.user.username}, post: #{post.post_number}, topic: #{post.topic_id}\"]"
+        return "#{quote_header}\n#{body}\n[/quote]"
+      end
+
+      puts "post #{import_id} quote source pid #{post_import_id} is not imported; preserving a static quote"
+    end
+
+    static_discuz_quote(attribution[:label], body)
+  end
+
+  def extract_discuz_quote_attribution(inner)
+    match = DISCUZ_QUOTE_HEADER.match(inner)
+    return { body: inner, label: nil, post_import_id: nil } unless match
+
+    label = match[:label].gsub(/\s+/, " ").strip
+    author, timestamp = label.split(/\s*发表于\s*/, 2)
+    normalized_label = [author&.strip, timestamp&.strip].compact.reject(&:empty?).join(" 发表于 ")
+
+    {
+      body: inner[match.end(0)..].to_s,
+      label: normalized_label.presence,
+      post_import_id: find_post_id_by_quote_number(match[0]),
+    }
+  end
+
+  def static_discuz_quote(label, body)
+    quote_header =
+      if label.present?
+        safe_label = label.tr(",[]\"", "，［］”")
+        "[quote=\"#{safe_label}\"]"
+      else
+        "[quote]"
+      end
+
+    "#{quote_header}\n#{body}\n[/quote]"
   end
 
   # for some reason, discuz inlined some png file
