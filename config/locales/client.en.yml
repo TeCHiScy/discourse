@@ -5,7 +5,6 @@ en:
       content_url: "Exact URL of the content"
       explanation: "Why do you believe this content is illegal?"
       explanation_help: "Describe the facts and why the content may be illegal. You do not need to cite a specific law."
-      anonymous_label: "Submit anonymously"
       name: "Full name or organization name"
       email: "Email address"
       declaration_section: "Declaration"
@@ -15,7 +14,6 @@ en:
       received_description: "%{site} has received your report for review."
       reference: "Your report reference is <strong>%{reference}</strong>."
       contact_confirmation: "We will email you a receipt and a copy of your report. The reviewing team will email you the outcome."
-      anonymous_confirmation: "Save your reference. Because you submitted anonymously, we cannot email you a receipt or the outcome."
     mcp_oauth_client_id_metadata_policy:
       disabled: "Admin registration only"
       approved_domains: "CIMD from approved domains"

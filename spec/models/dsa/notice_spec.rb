@@ -7,7 +7,6 @@ RSpec.describe Dsa::Notice do
       explanation: "This listing advertises counterfeit goods as authentic and deceives buyers.",
       name: "Pat O'Brien",
       email: "pat@example.com",
-      anonymous: false,
       declaration: true,
     }
   end

@@ -20,23 +20,16 @@ export default class DsaNoticeForm extends Component {
   get initialData() {
     return {
       content_url: this.args.contentUrl,
-      anonymous: false,
       declaration: false,
     };
   }
 
   @action
   async submit(data) {
-    const { name, email, ...notice } = data;
-    if (!notice.anonymous) {
-      notice.name = name;
-      notice.email = email;
-    }
-
     try {
       this.result = await ajax("/dsa/illegal-content", {
         type: "POST",
-        data: { notice },
+        data: { notice: data },
       });
       window.scrollTo(0, 0);
     } catch (error) {
@@ -70,53 +63,33 @@ export default class DsaNoticeForm extends Component {
             )
           }}
         </p>
-        {{#if this.result.contact}}
-          <p>{{i18n "dsa_notice.contact_confirmation"}}</p>
-        {{else}}
-          <p>{{i18n "dsa_notice.anonymous_confirmation"}}</p>
-        {{/if}}
+        <p>{{i18n "dsa_notice.contact_confirmation"}}</p>
       {{else}}
         <h1>{{i18n "dsa_notice.title"}}</h1>
         <FKContainer @direction="column" @format="max">
-          <Form
-            @data={{this.initialData}}
-            @onSubmit={{this.submit}}
-            as |form draft|
-          >
+          <Form @data={{this.initialData}} @onSubmit={{this.submit}} as |form|>
             <form.Section>
               <form.Field
                 @format="full"
-                @name="anonymous"
-                @showOptional={{false}}
-                @title={{i18n "dsa_notice.anonymous_label"}}
-                @type="checkbox"
+                @name="name"
+                @title={{i18n "dsa_notice.name"}}
+                @type="input"
+                @validation="required:trim|length:1,200"
                 as |field|
               >
-                <field.Control />
+                <field.Control autocomplete="name" />
               </form.Field>
-              {{#unless draft.anonymous}}
-                <form.Field
-                  @format="full"
-                  @name="name"
-                  @title={{i18n "dsa_notice.name"}}
-                  @type="input"
-                  @validation="required:trim|length:1,200"
-                  as |field|
-                >
-                  <field.Control autocomplete="name" />
-                </form.Field>
-                <form.Field
-                  @format="full"
-                  @name="email"
-                  @title={{i18n "dsa_notice.email"}}
-                  @type="input-email"
-                  @validate={{this.validateEmail}}
-                  @validation="required"
-                  as |field|
-                >
-                  <field.Control autocomplete="email" />
-                </form.Field>
-              {{/unless}}
+              <form.Field
+                @format="full"
+                @name="email"
+                @title={{i18n "dsa_notice.email"}}
+                @type="input-email"
+                @validate={{this.validateEmail}}
+                @validation="required"
+                as |field|
+              >
+                <field.Control autocomplete="email" />
+              </form.Field>
               <form.Field
                 @format="full"
                 @name="content_url"

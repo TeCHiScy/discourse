@@ -8,7 +8,6 @@ RSpec.describe Dsa::SubmitNotice do
         "This listing advertises counterfeit goods as authentic and its payment instructions appear intended to deceive buyers.",
       name: "Alex Morgan",
       email: "alex@example.com",
-      anonymous: false,
       declaration: true,
     }
   end
@@ -51,12 +50,11 @@ RSpec.describe Dsa::SubmitNotice do
       expect(contract.email).to eq("alex@example.com")
     end
 
-    it "discards contact information for anonymous notices" do
-      params[:anonymous] = true
+    it "requires contact information when a client requests anonymity" do
+      params.merge!(anonymous: true, name: nil, email: nil)
 
-      expect(contract).to be_valid
-      expect(contract.name).to be_nil
-      expect(contract.email).to be_nil
+      expect(contract).not_to be_valid
+      expect(contract.errors.attribute_names).to include(:name, :email)
     end
   end
 
@@ -86,7 +84,7 @@ RSpec.describe Dsa::SubmitNotice do
     context "when rate limits are enabled" do
       before { RateLimiter.enable }
 
-      it "limits contact notices by email address" do
+      it "limits notices by email address" do
         email_key = Digest::SHA256.hexdigest(params[:email])
         3.times { RateLimiter.new(nil, "dsa-notice-email-#{email_key}", 3, 1.day).performed! }
 
@@ -114,11 +112,11 @@ RSpec.describe Dsa::SubmitNotice do
         99.times { RateLimiter.new(nil, "dsa-notice-global", 100, 1.hour).performed! }
         expect { result }.to raise_error(RateLimiter::LimitExceeded)
 
-        anonymous_params = params.merge(anonymous: true)
+        other_reporter_params = params.merge(email: "other@example.com")
         remaining_result =
           described_class.call(
             params: {
-              notice: anonymous_params,
+              notice: other_reporter_params,
             },
             options: {
               ip_address: "198.51.100.2",
@@ -129,7 +127,7 @@ RSpec.describe Dsa::SubmitNotice do
         expect do
           described_class.call(
             params: {
-              notice: anonymous_params,
+              notice: other_reporter_params,
             },
             options: {
               ip_address: "198.51.100.3",
@@ -195,15 +193,6 @@ RSpec.describe Dsa::SubmitNotice do
         expect { result }.not_to change(Topic, :count)
         expect(result).to fail_to_find_a_model(:notice)
         expect(Jobs::DsaNoticeReceipt.jobs).to be_empty
-      end
-    end
-
-    context "when the reporter is anonymous" do
-      before { params[:anonymous] = true }
-
-      it "queues no external receipt" do
-        expect { result }.not_to change { Jobs::DsaNoticeReceipt.jobs.size }
-        expect(result).to run_successfully
       end
     end
 

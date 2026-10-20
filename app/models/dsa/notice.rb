@@ -4,7 +4,7 @@ module Dsa
   class Notice < ActiveRecord::Base
     self.table_name = "dsa_notices"
 
-    self.ignored_columns += %i[submission_id reference]
+    self.ignored_columns += %i[submission_id reference anonymous]
 
     belongs_to :post, -> { with_deleted }, optional: true
 
@@ -44,9 +44,7 @@ module Dsa
 
     def summary(plain_text: false)
       reporter =
-        if anonymous
-          I18n.t("dsa_notice.anonymous")
-        elsif plain_text
+        if plain_text
           "#{name} (#{email})"
         else
           "#{escaped(name)} ([#{escaped(email)}](mailto:#{ERB::Util.url_encode(email)}))"
@@ -79,7 +77,6 @@ end
 # Table name: dsa_notices
 #
 #  id                :bigint           not null, primary key
-#  anonymous         :boolean          default(FALSE), not null
 #  content_url       :text             not null
 #  declaration       :boolean          not null
 #  email             :string

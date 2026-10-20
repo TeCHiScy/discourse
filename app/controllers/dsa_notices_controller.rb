@@ -11,13 +11,7 @@ class DsaNoticesController < ApplicationController
 
   def create
     Dsa::SubmitNotice.call(service_params.merge(options: { ip_address: request.remote_ip })) do
-      on_success do |notice:|
-        render json: {
-                 reference: notice.reference,
-                 contact: notice.email.present?,
-               },
-               status: :created
-      end
+      on_success { |notice:| render json: { reference: notice.reference }, status: :created }
       on_failed_contract do |contract|
         render_json_error(contract.errors.full_messages, status: 422)
       end

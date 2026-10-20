@@ -5991,7 +5991,6 @@ CREATE TABLE public.dsa_notices (
     post_id bigint,
     content_url text NOT NULL,
     explanation text NOT NULL,
-    anonymous boolean DEFAULT false NOT NULL,
     name character varying,
     email character varying,
     declaration boolean NOT NULL,
@@ -25983,6 +25982,8 @@ ALTER TABLE ONLY public.ad_plugin_house_ads_groups
 SET search_path TO "$user", public;
 
 INSERT INTO "schema_migrations" (version) VALUES
+('20261020012225'),
+('20261020012158'),
 ('20261016072412'),
 ('20261016072254'),
 ('20261016063822'),

@@ -32,7 +32,6 @@ RSpec.describe DsaNoticesController do
           "This listing advertises counterfeit goods as authentic and its payment instructions appear intended to deceive buyers.",
         name: "Alex Morgan",
         email: "alex@example.invalid",
-        anonymous: false,
         declaration: true,
       }
     end
@@ -42,7 +41,6 @@ RSpec.describe DsaNoticesController do
       post "/dsa/illegal-content.json", params: { notice: }
       expect(response.status).to eq(201)
       expect(response.parsed_body["reference"]).to start_with("DSA-")
-      expect(response.parsed_body["contact"]).to eq(true)
     end
 
     it "returns not found when disabled" do

@@ -10,7 +10,6 @@ module Dsa
       attribute :notice do
         attribute :content_url, :string
         attribute :explanation, :string
-        attribute :anonymous, :boolean, default: false
         attribute :name, :string
         attribute :email, :string
         attribute :declaration, :boolean
@@ -18,7 +17,7 @@ module Dsa
         before_validation do
           @valid_shape =
             raw_attributes.all? do |field, value|
-              if %w[anonymous declaration].include?(field)
+              if field == "declaration"
                 [nil, true, false, "true", "false", "1", "0", 1, 0].include?(value)
               else
                 value.nil? || value.is_a?(String)
@@ -26,16 +25,15 @@ module Dsa
             end
           self.content_url = content_url.to_s.strip
           self.explanation = explanation.to_s.strip
-          self.name = anonymous ? nil : name.to_s.strip
-          self.email = anonymous ? nil : email.to_s.strip.downcase
+          self.name = name.to_s.strip
+          self.email = email.to_s.strip.downcase
         end
 
         validates :content_url, presence: true, length: { maximum: 2048 }
         validates :explanation, length: { minimum: 50, maximum: 20_000 }
         validates :declaration, inclusion: { in: [true] }
-        validates :anonymous, inclusion: { in: [true, false] }
-        validates :name, presence: true, length: { maximum: 200 }, unless: :anonymous
-        validates :email, presence: true, length: { maximum: 254 }, unless: :anonymous
+        validates :name, presence: true, length: { maximum: 200 }
+        validates :email, presence: true, length: { maximum: 254 }
         validate :valid_shape
         validate :valid_content_url
         validate :valid_email
@@ -58,7 +56,7 @@ module Dsa
         end
 
         def valid_email
-          return if anonymous || (Email.is_valid?(email) && !email.match?(/[\r\n]/))
+          return if Email.is_valid?(email) && !email.match?(/[\r\n]/)
           errors.add(:email, I18n.t("dsa_notice.invalid_email"))
         end
       end
@@ -69,7 +67,7 @@ module Dsa
     step :rate_limit_notice
     model :notice, :create_notice
     step :enqueue_group_notifications
-    only_if(:receipt_pending) { step :enqueue_receipt }
+    step :enqueue_receipt
 
     private
 
@@ -77,15 +75,13 @@ module Dsa
       if options.ip_address.present?
         RateLimiter.new(nil, "dsa-notice-ip-#{options.ip_address}", 5, 1.hour).performed!
       end
-      unless params.notice.anonymous
-        email_key = Digest::SHA256.hexdigest(params.notice.email)
-        email_limiter = RateLimiter.new(nil, "dsa-notice-email-#{email_key}", 3, 1.day)
-        email_limiter.performed!
-      end
+      email_key = Digest::SHA256.hexdigest(params.notice.email)
+      email_limiter = RateLimiter.new(nil, "dsa-notice-email-#{email_key}", 3, 1.day)
+      email_limiter.performed!
       begin
         RateLimiter.new(nil, "dsa-notice-global", 100, 1.hour).performed!
       rescue RateLimiter::LimitExceeded
-        email_limiter&.rollback!
+        email_limiter.rollback!
         raise
       end
     end
@@ -99,10 +95,6 @@ module Dsa
     def enqueue_group_notifications(notice:)
       PostJobsEnqueuer.new(notice.post, notice.post.topic, true).enqueue_jobs
       notice.mark_group_notified!
-    end
-
-    def receipt_pending(notice:)
-      notice.email.present?
     end
 
     def enqueue_receipt(notice:)

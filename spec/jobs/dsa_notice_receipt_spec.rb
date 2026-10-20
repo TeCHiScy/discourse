@@ -12,7 +12,6 @@ RSpec.describe Jobs::DsaNoticeReceipt do
           "This listing advertises counterfeit goods as authentic and its payment instructions appear intended to deceive buyers.",
         name: "Pat O'Brien",
         email: "alex@example.com",
-        anonymous: false,
         declaration: true,
       }
     end
@@ -33,13 +32,6 @@ RSpec.describe Jobs::DsaNoticeReceipt do
       end.to change { ActionMailer::Base.deliveries.size }.by(1)
 
       expect(notice.reload).to be_receipt_sent
-    end
-
-    it "sends nothing for an anonymous notice" do
-      notice_params[:anonymous] = true
-      notice_params[:name] = nil
-      notice_params[:email] = nil
-      expect { job.execute(notice_id:) }.not_to change { ActionMailer::Base.deliveries.size }
     end
 
     it "leaves delivery pending after SMTP failure and can retry" do
