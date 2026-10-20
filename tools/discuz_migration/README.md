@@ -53,7 +53,10 @@ All staged modes require `DISCUZX_SAMPLE_MANIFEST` and write only to the databas
 that manifest. The sample target allowlist includes a separate UID 18 rehearsal database so
 the currently served sample remains intact during reimport.
 
-User identity handling is source-tagged. Each imported account carries
+User identity handling is source-tagged. Each imported account carries the source avatarstatus
+as a discuz_avatarstatus field. Users with no custom Discuz avatar use Discourse's default
+letter avatar; users with a custom avatar keep the Discuz URL unless a local avatar upload
+was imported. Each account also carries
 `discuz_source=discuz_x3.5` and its Discuz UID; the legacy password adapter accepts only
 accounts whose source marker, UID, and importer `import_id` agree. Discourse validates and
 suggests unique usernames. Email conflicts (including Discourse-normalized aliases) are

@@ -207,6 +207,7 @@ class DiscuzImportVerifier
         email_conflict_remaps,
       )
     provenance_report = verify_discuz_provenance(user_imports)
+    avatar_report = verify_discuz_avatar_mapping(source, user_imports)
     expected_category_imports =
       category_imports.select { |source_id, _target_id| source[:category_ids].include?(source_id) }
     site_setup_report = verify_site_setup(expected_category_imports)
@@ -239,6 +240,7 @@ class DiscuzImportVerifier
       compare_ids(expected_duplicate_emails, imported_duplicate_emails)[:unexpected_count],
       provenance_report[:mismatch_count],
       provenance_report[:unexpected_tagged_account_count],
+      avatar_report[:failure_count],
       email_confirmation_report[:failure_count],
       site_setup_report[:failure_count],
       category_comparison[:missing_count],
@@ -293,6 +295,7 @@ class DiscuzImportVerifier
         target_email_conflict_remap_count: email_conflict_remaps.length,
         email_confirmation: email_confirmation_report,
         provenance: provenance_report,
+        avatar_mapping: avatar_report,
         legacy_auth: password_report,
       },
       site_setup: site_setup_report,
@@ -792,6 +795,7 @@ class DiscuzImportVerifier
         email_conflict_remaps,
       )
     provenance_report = verify_discuz_provenance(user_imports)
+    avatar_report = verify_discuz_avatar_mapping(source, user_imports)
     expected_category_imports =
       category_imports.select { |source_id, _target_id| source[:category_ids].include?(source_id) }
     site_setup_report = verify_site_setup(expected_category_imports)
@@ -814,6 +818,7 @@ class DiscuzImportVerifier
       compare_ids(expected_duplicate_emails, imported_duplicate_emails)[:unexpected_count],
       provenance_report[:mismatch_count],
       provenance_report[:unexpected_tagged_account_count],
+      avatar_report[:failure_count],
       email_confirmation_report[:failure_count],
       site_setup_report[:failure_count],
       category_comparison[:missing_count],
@@ -847,6 +852,7 @@ class DiscuzImportVerifier
         target_email_conflict_remap_count: email_conflict_remaps.length,
         email_confirmation: email_confirmation_report,
         provenance: provenance_report,
+        avatar_mapping: avatar_report,
         legacy_auth: password_report,
       },
       site_setup: site_setup_report,
@@ -895,7 +901,7 @@ class DiscuzImportVerifier
     member_filter = " WHERE uid IN (#{sample_id_sql("member_uids")})" if @sample_manifest
     members =
       rows(
-        "SELECT uid, email, emailstatus FROM (#{member_union}) members#{member_filter} ORDER BY uid",
+        "SELECT uid, email, emailstatus, avatarstatus FROM (#{member_union}) members#{member_filter} ORDER BY uid",
       )
     member_ids = members.map { |row| row["uid"].to_s }.to_set
     references = @sample_manifest ? sample_referenced_uid_union : referenced_uid_union
@@ -1871,6 +1877,68 @@ class DiscuzImportVerifier
       mismatch_count: mismatch_count,
       unexpected_tagged_account_count: unexpected_tagged_account_count,
     }
+  end
+
+  def verify_discuz_avatar_mapping(source, user_imports)
+    expected_status_by_uid =
+      source[:members].to_h do |row|
+        [row["uid"].to_s, row["avatarstatus"].to_s.to_i == 1 ? "1" : "0"]
+      end
+    target_ids = expected_status_by_uid.keys.filter_map { |uid| user_imports[uid] }.uniq
+    users = User.where(id: target_ids).index_by(&:id)
+    imported_status_by_user =
+      UserCustomField
+        .where(user_id: target_ids, name: "discuz_avatarstatus")
+        .pluck(:user_id, :value)
+        .to_h
+
+    missing_target_count =
+      expected_status_by_uid.count { |uid, _status| !users.key?(user_imports[uid]) }
+    marker_mismatch_count =
+      expected_status_by_uid.count do |uid, expected_status|
+        user_id = user_imports[uid]
+        users.key?(user_id) && imported_status_by_user[user_id].to_s != expected_status
+      end
+    rendering_mismatch_count =
+      expected_status_by_uid.count do |uid, expected_status|
+        user = users[user_imports[uid]]
+        next false unless user
+
+        if expected_status == "1" && user.uploaded_avatar_id.blank?
+          user.avatar_template != discuz_avatar_template(uid)
+        elsif expected_status == "0"
+          user.uploaded_avatar_id.present? ||
+            user.avatar_template !=
+              ::DiscourseDiscuzLegacyAuth::UserAvatarExtension.local_default_avatar_template(
+                user.username,
+              )
+        else
+          user.avatar_template.start_with?(
+            ::DiscourseDiscuzLegacyAuth::UserAvatarExtension::DISCUZ_AVATAR_BASE_URL,
+          )
+        end
+      end
+
+    {
+      source_without_custom_avatar_count:
+        expected_status_by_uid.count { |_uid, status| status == "0" },
+      source_with_custom_avatar_count:
+        expected_status_by_uid.count { |_uid, status| status == "1" },
+      missing_target_count: missing_target_count,
+      marker_mismatch_count: marker_mismatch_count,
+      rendering_mismatch_count: rendering_mismatch_count,
+      failure_count: missing_target_count + marker_mismatch_count + rendering_mismatch_count,
+      comparison:
+        "Discuz avatarstatus=0 must use the Discourse default avatar; status=1 uses the DZ URL unless an uploaded Discourse avatar exists",
+    }
+  end
+
+  def discuz_avatar_template(uid)
+    padded_uid = uid.to_s.rjust(9, "0")
+    avatar_path = [padded_uid[0, 3], padded_uid[3, 2], padded_uid[5, 2]]
+    filename = "#{padded_uid[-2, 2]}_avatar_small.jpg"
+    base_url = ::DiscourseDiscuzLegacyAuth::UserAvatarExtension::DISCUZ_AVATAR_BASE_URL
+    "#{base_url}/#{(avatar_path + [filename]).join("/")}"
   end
 
   def verify_email_confirmation(source, user_imports, duplicate_email_uids, email_conflict_uids)

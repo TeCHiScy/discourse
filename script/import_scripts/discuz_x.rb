@@ -492,6 +492,9 @@ class ImportScripts::DiscuzX < ImportScripts::Base
 
   def configure_site_for_discuz_import!
     SiteSetting.default_locale = "zh_CN"
+    if SiteSetting.external_system_avatars_url.blank?
+      SiteSetting.external_system_avatars_url = SiteSetting.defaults[:external_system_avatars_url]
+    end
     SiteSetting.unicode_usernames = true
 
     unless SiteSetting.default_locale == "zh_CN" && SiteSetting.unicode_usernames
@@ -949,6 +952,7 @@ class ImportScripts::DiscuzX < ImportScripts::Base
             uid: user["id"].to_i,
             email: user["email"].to_s,
             email_confirmed: user["email_confirmed"].to_s.to_i == 1,
+            avatar_status: user["avatar_exists"].to_s.to_i == 1 ? "1" : "0",
           }
         end
       target_email_conflicts = target_email_conflict_keys(results.map { |user| user["email"] })
@@ -961,6 +965,7 @@ class ImportScripts::DiscuzX < ImportScripts::Base
           !duplicated_email && email_key.present? && target_email_conflicts.include?(email_key)
         email = duplicated_email || email_conflict ? reserved_discuz_email(uid) : source_email
         custom_fields = {}
+        custom_fields["discuz_avatarstatus"] = user["avatar_exists"].to_s.to_i == 1 ? "1" : "0"
         custom_fields["discuz_duplicate_email"] = true if duplicated_email
         custom_fields["discuz_email_conflict"] = true if email_conflict
         custom_fields["discuz_original_email"] = source_email if (
@@ -1125,6 +1130,7 @@ class ImportScripts::DiscuzX < ImportScripts::Base
         }
       end
       reconcile_discuz_user_activation!(activation_rows)
+      reconcile_discuz_user_avatarstatus!(activation_rows)
     end
   end
 
@@ -1212,6 +1218,40 @@ class ImportScripts::DiscuzX < ImportScripts::Base
       puts "Confirmed verified Discuz email status for #{confirmed_count} imported account(s)"
     end
     activated_count + confirmed_count
+  end
+
+  def reconcile_discuz_user_avatarstatus!(source_users)
+    targets =
+      source_users.filter_map do |source_user|
+        target_user_id = user_id_from_imported_user_id(source_user[:uid])
+        [target_user_id, source_user] if target_user_id
+      end
+    return 0 if targets.empty?
+
+    users_by_id = User.where(id: targets.map(&:first)).index_by(&:id)
+    updated_count =
+      targets.count do |target_user_id, source_user|
+        user = users_by_id[target_user_id]
+        next false unless user
+
+        fields = user.custom_fields
+        uid = source_user[:uid].to_s
+        next false unless fields["discuz_source"] == DISCUZ_SOURCE
+        next false unless fields["discuz_uid"].to_s == uid
+        next false unless fields["import_id"].to_s == uid
+
+        avatar_status = source_user[:avatar_status].to_s == "1" ? "1" : "0"
+        next false if fields["discuz_avatarstatus"].to_s == avatar_status
+
+        fields["discuz_avatarstatus"] = avatar_status
+        user.save_custom_fields
+        true
+      end
+
+    if updated_count.positive?
+      puts "Reconciled Discuz avatar status for #{updated_count} imported account(s)"
+    end
+    updated_count
   end
 
   def activate_discuz_user_from_verified_email!(

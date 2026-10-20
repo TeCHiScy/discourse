@@ -16,9 +16,9 @@ class LetterAvatar
   end
 
   # BUMP UP if avatar algorithm changes
-  VERSION = 5
+  VERSION = 6
 
-  VIPS_VERSION = 6
+  VIPS_VERSION = 7
   private_constant :VIPS_VERSION
 
   # CHANGE these values to support more pixel ratios
@@ -28,7 +28,8 @@ class LetterAvatar
   private_constant :DISCOURSE_FONT_PATH
 
   MACOS_FONT_PATH = "/System/Library/Fonts/Helvetica.ttc"
-  private_constant :MACOS_FONT_PATH
+  MACOS_CJK_FONT_PATH = "/System/Library/Fonts/Hiragino Sans GB.ttc"
+  private_constant :MACOS_FONT_PATH, :MACOS_CJK_FONT_PATH
 
   class << self
     def version
@@ -69,7 +70,13 @@ class LetterAvatar
     end
 
     def cached_path(identity, size)
-      dir = "#{cache_path}/#{identity.letter}/#{identity.color.join("_")}"
+      letter_directory =
+        if identity.letter.match?(/\A[A-Za-z0-9_.-]+\z/)
+          identity.letter
+        else
+          identity.letter.unpack1("H*")
+        end
+      dir = "#{cache_path}/#{letter_directory}/#{identity.color.join("_")}"
       FileUtils.mkdir_p(dir)
       File.expand_path "#{dir}/#{size}.png"
     end
@@ -86,14 +93,14 @@ class LetterAvatar
           letter: ERB::Util.html_escape(identity.letter),
           output_path: filename,
           background_color: format("%02X%02X%02X", *identity.color),
-          font: "#{font_family} #{POINTSIZE}",
-          font_path:,
+          font: "#{font_family_for(identity.letter)} #{POINTSIZE}",
+          font_path: font_path_for(identity.letter),
         )
       else
         color = identity.color
         letter = identity.letter
-        font = macos? ? "Helvetica" : "NimbusSans-Regular"
-        vertical_offset = font == "Helvetica" ? 26 : 34
+        font = macos? ? font_path_for(letter) : "NimbusSans-Regular"
+        vertical_offset = macos? ? 26 : 34
 
         ImageProcessing::OutputFile.write(filename) do |temporary_path|
           ImageMagick.magick(
@@ -115,6 +122,7 @@ class LetterAvatar
             "8",
             temporary_path,
             operation: :letter_avatar_render,
+            read: macos? ? [font] : [],
             write: [temporary_path],
           )
         end
@@ -159,20 +167,25 @@ class LetterAvatar
       "rgb(#{red},#{green},#{blue})"
     end
 
-    def font_path
-      macos? ? MACOS_FONT_PATH : DISCOURSE_FONT_PATH
+    def font_path_for(letter)
+      return DISCOURSE_FONT_PATH unless macos?
+
+      letter.ascii_only? ? MACOS_FONT_PATH : MACOS_CJK_FONT_PATH
     end
 
     def font_version
-      Digest::MD5.file(font_path).hexdigest
+      font_paths = [font_path_for("A"), font_path_for("清")].uniq
+      Digest::MD5.hexdigest(font_paths.map { |path| Digest::MD5.file(path).hexdigest }.join("\0"))
     end
 
     def macos?
       RbConfig::CONFIG["host_os"].match?(/darwin/i)
     end
 
-    def font_family
-      macos? ? "Helvetica" : "Noto Sans"
+    def font_family_for(letter)
+      return "Noto Sans" unless macos?
+
+      letter.ascii_only? ? "Helvetica" : "Hiragino Sans GB"
     end
   end
 

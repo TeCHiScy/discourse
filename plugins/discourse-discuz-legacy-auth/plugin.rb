@@ -15,6 +15,7 @@ gem "bcrypt", "3.1.22"
 
 after_initialize do
   register_user_custom_field_type("discuz_signature_html", :string, max_length: 20_000)
+  register_user_custom_field_type("discuz_avatarstatus", :string)
   allow_public_user_custom_field("discuz_signature_html")
   register_post_custom_field_type("discuz_usesig", :boolean)
   register_post_custom_field_type("discuz_anonymous", :boolean)
