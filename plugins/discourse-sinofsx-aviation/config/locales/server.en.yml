@@ -1,0 +1,5 @@
+en:
+  sinofsx_aviation:
+    callsign_exam:
+      invalid_submission: "Please select an answer for each question and submit again."
+      not_configured: "The callsign exam is not available yet."

@@ -1,0 +1,4 @@
+plugins:
+  discourse_sinofsx_aviation_callsign_exam_enabled:
+    default: false
+    client: true

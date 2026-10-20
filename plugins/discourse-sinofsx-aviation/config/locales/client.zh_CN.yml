@@ -1,0 +1,15 @@
+zh_CN:
+  sinofsx_aviation:
+    callsign: 呼号
+    airline: 虚拟航空公司
+    atc_rank: 管制级别
+    pilot_hours: 飞行小时
+    atc_hours: 管制小时
+    callsign_exam:
+      open: 呼号注册考试
+      title: SinoFSX 呼号注册考试
+      loading: 正在加载考试题目…
+      already_passed: 你已经通过呼号注册考试。
+      not_configured: 呼号注册考试暂不可用。
+      failed: 很抱歉，你未通过考试。请阅读联线守则后重试。
+      submit: 提交答案

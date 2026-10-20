@@ -1,0 +1,15 @@
+en:
+  sinofsx_aviation:
+    callsign: Callsign
+    airline: Virtual airline
+    atc_rank: ATC rank
+    pilot_hours: Flight hours
+    atc_hours: ATC hours
+    callsign_exam:
+      open: Callsign registration exam
+      title: SinoFSX callsign registration exam
+      loading: Loading the exam…
+      already_passed: You have already passed the callsign registration exam.
+      not_configured: The callsign exam is not available yet.
+      failed: You did not pass. Review the rules and try again.
+      submit: Submit answers

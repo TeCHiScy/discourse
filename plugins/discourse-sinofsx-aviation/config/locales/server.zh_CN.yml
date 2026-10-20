@@ -1,0 +1,5 @@
+zh_CN:
+  sinofsx_aviation:
+    callsign_exam:
+      invalid_submission: "请为每道题选择答案后再提交。"
+      not_configured: "呼号注册考试暂不可用。"
