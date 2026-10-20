@@ -7,7 +7,6 @@ RSpec.describe Dsa::Notice do
       explanation: "This listing advertises counterfeit goods as authentic and deceives buyers.",
       name: "Pat O'Brien",
       email: "pat@example.com",
-      declaration: true,
     }
   end
 
@@ -42,20 +41,6 @@ RSpec.describe Dsa::Notice do
       )
 
       expect(described_class.count).to eq(notice_count)
-    end
-  end
-
-  describe "#mark_group_notified!" do
-    fab!(:group)
-
-    it "records when group notifications were queued" do
-      notice = described_class.create_with_post!(attributes:, group:)
-
-      freeze_time do
-        notice.mark_group_notified!
-
-        expect(notice.reload.group_notified_at).to eq_time(Time.current)
-      end
     end
   end
 

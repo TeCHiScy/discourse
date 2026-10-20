@@ -5993,11 +5993,8 @@ CREATE TABLE public.dsa_notices (
     explanation text NOT NULL,
     name character varying,
     email character varying,
-    declaration boolean NOT NULL,
-    group_notified_at timestamp(6) without time zone,
     receipt_sent_at timestamp(6) without time zone,
-    created_at timestamp(6) without time zone NOT NULL,
-    updated_at timestamp(6) without time zone NOT NULL
+    created_at timestamp(6) without time zone NOT NULL
 );
 
 
@@ -25982,6 +25979,8 @@ ALTER TABLE ONLY public.ad_plugin_house_ads_groups
 SET search_path TO "$user", public;
 
 INSERT INTO "schema_migrations" (version) VALUES
+('20261020012923'),
+('20261020012857'),
 ('20261020012225'),
 ('20261020012158'),
 ('20261016072412'),

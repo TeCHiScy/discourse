@@ -12,7 +12,6 @@ RSpec.describe Jobs::DsaNoticeReceipt do
           "This listing advertises counterfeit goods as authentic and its payment instructions appear intended to deceive buyers.",
         name: "Pat O'Brien",
         email: "alex@example.com",
-        declaration: true,
       }
     end
 

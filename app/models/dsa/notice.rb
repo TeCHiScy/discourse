@@ -4,7 +4,14 @@ module Dsa
   class Notice < ActiveRecord::Base
     self.table_name = "dsa_notices"
 
-    self.ignored_columns += %i[submission_id reference anonymous]
+    self.ignored_columns += %i[
+      anonymous
+      declaration
+      group_notified_at
+      reference
+      submission_id
+      updated_at
+    ]
 
     belongs_to :post, -> { with_deleted }, optional: true
 
@@ -32,10 +39,6 @@ module Dsa
 
     def receipt_sent?
       receipt_sent_at.present?
-    end
-
-    def mark_group_notified!
-      update!(group_notified_at: Time.current)
     end
 
     def mark_receipt_sent!
@@ -76,17 +79,14 @@ end
 #
 # Table name: dsa_notices
 #
-#  id                :bigint           not null, primary key
-#  content_url       :text             not null
-#  declaration       :boolean          not null
-#  email             :string
-#  explanation       :text             not null
-#  group_notified_at :datetime
-#  name              :string
-#  receipt_sent_at   :datetime
-#  created_at        :datetime         not null
-#  updated_at        :datetime         not null
-#  post_id           :bigint
+#  id              :bigint           not null, primary key
+#  content_url     :text             not null
+#  email           :string
+#  explanation     :text             not null
+#  name            :string
+#  receipt_sent_at :datetime
+#  created_at      :datetime         not null
+#  post_id         :bigint
 #
 # Indexes
 #

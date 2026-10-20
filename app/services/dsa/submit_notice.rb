@@ -89,12 +89,11 @@ module Dsa
     def create_notice(params:)
       group = Group.find_by(id: SiteSetting.dsa_notice_group)
       group = Group[:admins] if !group || !group.users.exists?
-      Dsa::Notice.create_with_post!(attributes: params.notice.to_hash, group:)
+      Dsa::Notice.create_with_post!(attributes: params.notice.to_hash.except(:declaration), group:)
     end
 
     def enqueue_group_notifications(notice:)
       PostJobsEnqueuer.new(notice.post, notice.post.topic, true).enqueue_jobs
-      notice.mark_group_notified!
     end
 
     def enqueue_receipt(notice:)
