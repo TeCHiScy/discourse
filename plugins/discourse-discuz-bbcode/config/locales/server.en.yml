@@ -2,3 +2,11 @@ en:
   site_settings:
     discourse_discuz_bbcode_tables_enabled: "Render Discuz table BBCode in posts"
     discourse_discuz_bbcode_attachments_enabled: "Render Discuz attachment BBCode in posts"
+    discourse_discuz_bbcode_sell_enabled: "Safely render Discuz paid-content sections"
+    discourse_discuz_bbcode_sell_source_open: "Respect the source Discuz dc_sell enabled state"
+    discourse_discuz_bbcode_sell_source_configured: "Discuz dc_sell source settings were imported"
+    discourse_discuz_bbcode_sell_purchase_enabled: "Allow users to buy imported Discuz paid-content sections"
+    discourse_discuz_bbcode_sell_tax_percent: "Discuz dc_sell seller tax percentage"
+    discourse_discuz_bbcode_sell_max_price: "Discuz dc_sell maximum displayed and charged price"
+    discourse_discuz_bbcode_sell_free_group_ids: "Comma-separated Discuz groups that can view paid sections for free"
+    discourse_discuz_bbcode_sell_forum_ids: "Comma-separated Discuz forums where dc_sell is enabled"

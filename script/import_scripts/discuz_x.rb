@@ -17,6 +17,7 @@ require_relative "../../tools/discuz_migration/category_permissions"
 require_relative "../../tools/discuz_migration/category_eligibility"
 require_relative "../../tools/discuz_migration/medals"
 require_relative "../../tools/discuz_migration/smilies"
+require_relative "../../plugins/discourse-discuz-bbcode/lib/discourse_discuz_bbcode/sell_tag_parser"
 
 class ImportScripts::DiscuzX < ImportScripts::Base
   DISCUZX_DB = ENV.fetch("DISCUZX_DB", "bbs")
@@ -50,6 +51,9 @@ class ImportScripts::DiscuzX < ImportScripts::Base
     discourse_development
     discourse_migration_sample
     discourse_migration_sample_uid18_20261013
+    discourse_migration_sell_sample_20261018
+    discourse_migration_sell_preview_20261018
+    discourse_migration_sell_public_preview_20261018
   ].freeze
 
   def initialize
@@ -114,8 +118,18 @@ class ImportScripts::DiscuzX < ImportScripts::Base
     validate_attachment_snapshot! if ENV["DISCUZX_IMPORT_ATTACHMENTS"] == "1"
     validate_sample_source! if @sample_manifest
     stage = ENV.fetch("DISCUZX_IMPORT_STAGE", "all")
-    if %w[all identity content categories attachments attachment_metadata medals].exclude?(stage)
-      raise "DISCUZX_IMPORT_STAGE must be all, identity, content, categories, attachments, attachment_metadata, or medals"
+    if %w[
+         all
+         identity
+         content
+         categories
+         attachments
+         attachment_metadata
+         medals
+         sell_balances
+         sell_sections
+       ].exclude?(stage)
+      raise "DISCUZX_IMPORT_STAGE must be all, identity, content, categories, attachments, attachment_metadata, medals, sell_balances, or sell_sections"
     end
     raise "sample stages require a sample manifest" if stage != "all" && !@sample_manifest
     if stage == "attachments" && !attachments_enabled?
@@ -159,6 +173,22 @@ class ImportScripts::DiscuzX < ImportScripts::Base
       return
     end
 
+    if stage == "sell_balances"
+      validate_existing_discuz_user_mappings!
+      import_discuz_sell_financials!
+      puts "Sample Discuz credit-balance stage complete; posts and messages were untouched"
+      report_source_skips
+      return
+    end
+
+    if stage == "sell_sections"
+      validate_existing_discuz_user_mappings!
+      import_discuz_sell_sections
+      puts "Sample Discuz paid-section stage complete; other imported records were untouched"
+      report_source_skips
+      return
+    end
+
     if stage == "categories"
       @skip_updates = true
       import_categories
@@ -168,10 +198,23 @@ class ImportScripts::DiscuzX < ImportScripts::Base
       return
     end
 
+    if stage == "content"
+      validate_existing_discuz_user_mappings!
+      sanitize_existing_sell_posts!
+      import_posts
+      sanitize_existing_sell_posts!
+      import_discuz_sell_sections
+      import_private_messages
+      puts "Sample content stage complete; users and categories were untouched"
+      report_source_skips
+      return
+    end
+
     validate_existing_discuz_user_mappings!
     get_duplicate_email_uids
     import_users
     import_unrepresented_users
+    import_discuz_sell_financials!
     import_categories
     if stage == "identity"
       prepare_site_for_discuz_import!
@@ -179,7 +222,10 @@ class ImportScripts::DiscuzX < ImportScripts::Base
       report_source_skips
       return
     end
+    sanitize_existing_sell_posts!
     import_posts
+    sanitize_existing_sell_posts!
+    import_discuz_sell_sections
     import_private_messages
     if ENV["DISCUZX_IMPORT_ATTACHMENTS"] == "1"
       import_attachments
@@ -633,9 +679,13 @@ class ImportScripts::DiscuzX < ImportScripts::Base
     manifest = JSON.parse(File.read(real_path))
     raise "unsupported sample manifest version" unless manifest["version"] == 1
     sample_database = manifest.fetch("target_database", "discourse_migration_sample")
-    if %w[discourse_migration_sample discourse_migration_sample_uid18_20261013].exclude?(
-         sample_database,
-       )
+    if %w[
+         discourse_migration_sample
+         discourse_migration_sample_uid18_20261013
+         discourse_migration_sell_sample_20261018
+         discourse_migration_sell_preview_20261018
+         discourse_migration_sell_public_preview_20261018
+       ].exclude?(sample_database)
       raise "sample manifest target database is not approved"
     end
     %w[
@@ -648,12 +698,27 @@ class ImportScripts::DiscuzX < ImportScripts::Base
       pm_message_ids
       placeholder_uids
       required_uids
+      sell_post_ids
+      sell_log_ids
+      sell_buyer_uids
     ].each do |key|
+      next unless manifest.key?(key)
+
       ids = manifest.fetch(key)
       unless ids.is_a?(Array) && ids.all? { |id| id.is_a?(Integer) && id.positive? } &&
                ids.uniq.length == ids.length
         raise "invalid sample manifest IDs for #{key}"
       end
+    end
+    if manifest.key?("sell_section_ids")
+      pairs = manifest.fetch("sell_section_ids")
+      valid_pairs =
+        pairs.is_a?(Array) &&
+          pairs.all? do |pair|
+            pair.is_a?(Array) && pair.length == 2 &&
+              pair.all? { |id| id.is_a?(Integer) && id >= 0 } && pair.first.positive?
+          end && pairs.uniq.length == pairs.length
+      raise "invalid sample manifest IDs for sell_section_ids" unless valid_pairs
     end
     manifest
   rescue Errno::ENOENT
@@ -661,7 +726,7 @@ class ImportScripts::DiscuzX < ImportScripts::Base
   end
 
   def sample_ids(key)
-    @sample_manifest ? @sample_manifest.fetch(key).map(&:to_i) : []
+    @sample_manifest ? @sample_manifest.fetch(key, []).map(&:to_i) : []
   end
 
   def sample_id_sql(key)
@@ -794,10 +859,15 @@ class ImportScripts::DiscuzX < ImportScripts::Base
       SELECT CAST(SUBSTRING_INDEX(min_max, '_', -1) AS UNSIGNED) uid
         FROM #{pm_list_table}
        WHERE pmtype = 1 AND min_max REGEXP '^[0-9]+_[0-9]+$'
+      UNION
+      SELECT DISTINCT uid FROM #{table_name("dc_sell_log")} WHERE uid > 0
     SQL
   end
 
   def sample_referenced_uid_union
+    selected_members =
+      "SELECT uid FROM (#{source_member_union}) members " \
+        "WHERE uid IN (#{sample_id_sql("member_uids")})"
     post_authors =
       "SELECT DISTINCT authorid uid FROM #{table_name("forum_post")} WHERE authorid > 0 AND tid IN (#{sample_id_sql("topic_ids")})"
     pm_authors =
@@ -820,13 +890,28 @@ class ImportScripts::DiscuzX < ImportScripts::Base
        WHERE pmtype = 1 AND min_max REGEXP '^[0-9]+_[0-9]+$'
          AND plid IN (#{sample_id_sql("pm_thread_ids")})
     SQL
-    [post_authors, pm_members, pm_authors, pm_pair_participants].join("\nUNION\n")
+    sell_buyers =
+      "SELECT DISTINCT uid FROM #{table_name("dc_sell_log")} " \
+        "WHERE uid > 0 AND uid IN (#{sample_id_sql("sell_buyer_uids")})"
+    [
+      selected_members,
+      post_authors,
+      pm_members,
+      pm_authors,
+      pm_pair_participants,
+      sell_buyers,
+    ].join("\nUNION\n")
   end
 
   def import_unrepresented_users
     puts "", "creating placeholders for referenced UIDs without BBS member rows"
 
-    references = @sample_manifest ? sample_referenced_uid_union : source_referenced_uid_union
+    references =
+      if @sample_manifest
+        sample_referenced_uid_union
+      else
+        "SELECT uid FROM (#{source_member_union}) members UNION #{source_referenced_uid_union}"
+      end
     members = source_member_union
     ucenter_members = ucenter_table_name("members")
     results = mysql_query(<<~SQL)
@@ -1930,7 +2015,7 @@ class ImportScripts::DiscuzX < ImportScripts::Base
   def process_discuz_category_text(raw)
     return "" if raw.blank?
 
-    text = process_discuzx_post(raw, nil)
+    text = process_discuzx_post(raw, nil, extract_sell_sections: false)
     if @bbcode_to_md
       text =
         begin
@@ -1942,9 +2027,12 @@ class ImportScripts::DiscuzX < ImportScripts::Base
     text
   end
 
-  def process_discuzx_post(raw, import_id)
+  def process_discuzx_post(raw, import_id, extract_sell_sections: true)
     # raw = process_and_upload_inline_images(raw)
     s = raw.dup
+    if extract_sell_sections
+      s, = DiscourseDiscuzBbcode::SellTagParser.extract(s, discuz_pid: import_id)
+    end
 
     # Strip the quote
     # [quote] quotation includes the topic which is the same as reply to in Discourse
@@ -2092,6 +2180,458 @@ class ImportScripts::DiscuzX < ImportScripts::Base
     end
 
     s.strip
+  end
+
+  def source_sell_post_ids
+    return @source_sell_post_ids if defined?(@source_sell_post_ids)
+
+    sample_filter = " AND pid IN (#{sample_id_sql("post_ids")})" if @sample_manifest
+    @source_sell_post_ids =
+      mysql_query(
+        "SELECT pid, message FROM #{table_name("forum_post")} " \
+          "WHERE LOCATE('[sell', LOWER(message)) > 0#{sample_filter} ORDER BY pid",
+      ).filter_map do |row|
+        pid = row["pid"].to_i
+        _sanitized, sections =
+          DiscourseDiscuzBbcode::SellTagParser.extract(row["message"], discuz_pid: pid)
+        pid if sections.any?
+      end
+
+    if @sample_manifest && @sample_manifest["sell_post_ids"]
+      declared_ids = @sample_manifest.fetch("sell_post_ids").map(&:to_i).sort
+      unless @source_sell_post_ids.sort == declared_ids
+        raise "sample manifest Discuz sell post IDs do not match the selected source posts"
+      end
+    end
+
+    @source_sell_post_ids
+  end
+
+  def source_sell_post_rows(source_post_ids)
+    source_post_ids
+      .each_slice(500)
+      .flat_map do |pid_batch|
+        mysql_query(
+          "SELECT p.pid, p.tid, p.authorid, p.message, COALESCE(t.fid, 0) fid " \
+            "FROM #{table_name("forum_post")} p " \
+            "LEFT JOIN #{table_name("forum_thread")} t ON t.tid = p.tid " \
+            "WHERE p.pid IN (#{pid_batch.join(",")}) ORDER BY p.pid",
+        ).to_a
+      end
+  end
+
+  def sanitize_existing_sell_posts!
+    source_ids = source_sell_post_ids
+    return if source_ids.empty?
+
+    import_map =
+      PostCustomField
+        .where(name: "import_id", value: source_ids.map(&:to_s))
+        .pluck(:value, :post_id)
+        .to_h
+    changed_count = 0
+
+    source_ids.each_slice(500) do |pid_batch|
+      target_ids = pid_batch.filter_map { |pid| import_map[pid.to_s] }
+      Post
+        .unscoped
+        .where(id: target_ids)
+        .find_each do |post|
+          source_id = import_map.key(post.id).to_s
+          next unless post.raw.match?(/\[sell\s*=/i)
+
+          sanitized, = DiscourseDiscuzBbcode::SellTagParser.extract(post.raw, discuz_pid: source_id)
+          next if sanitized == post.raw
+
+          PostRevisor.new(post).revise!(
+            post.user,
+            { raw: sanitized },
+            bypass_bump: true,
+            edit_reason: "隐藏 Discuz 付费区块正文",
+          )
+          changed_count += 1
+        end
+    end
+
+    puts "Existing imported Discuz sell posts sanitized: #{changed_count}"
+  end
+
+  def import_discuz_sell_settings!
+    return @discuz_sell_settings if defined?(@discuz_sell_settings)
+
+    variables =
+      mysql_query(
+        "SELECT v.variable, v.value FROM #{table_name("common_plugin")} p " \
+          "JOIN #{table_name("common_pluginvar")} v ON v.pluginid = p.pluginid " \
+          "WHERE p.identifier = 'dc_sell' " \
+          "AND v.variable IN ('open', 'fids', 'free', 'maxprice', 'salestax')",
+      ).each_with_object({}) { |row, result| result[row["variable"]] = row["value"] }
+    return nil if variables.empty?
+
+    tax_percent = Integer(variables.fetch("salestax", "0"))
+    max_price = Integer(variables.fetch("maxprice", "100"))
+    unless tax_percent.between?(0, 100) && max_price.positive?
+      raise "Discuz dc_sell tax or maximum price is invalid"
+    end
+
+    free_group_ids = unserialize_discuz_ids(variables.fetch("free", ""))
+    forum_ids = unserialize_discuz_ids(variables.fetch("fids", ""))
+    SiteSetting.discourse_discuz_bbcode_sell_source_configured = true
+    SiteSetting.discourse_discuz_bbcode_sell_source_open = variables.fetch("open", "0").to_i == 1
+    SiteSetting.discourse_discuz_bbcode_sell_tax_percent = tax_percent
+    SiteSetting.discourse_discuz_bbcode_sell_max_price = max_price
+    SiteSetting.discourse_discuz_bbcode_sell_free_group_ids = free_group_ids.join(",")
+    SiteSetting.discourse_discuz_bbcode_sell_forum_ids = forum_ids.join(",")
+
+    @discuz_sell_settings = {
+      source_open: SiteSetting.discourse_discuz_bbcode_sell_source_open,
+      tax_percent: tax_percent,
+      max_price: max_price,
+      free_group_ids: free_group_ids,
+      forum_ids: forum_ids,
+    }
+  end
+
+  def source_discuz_credit_types
+    return @discuz_credit_types if defined?(@discuz_credit_types)
+
+    row =
+      mysql_query(
+        "SELECT svalue value FROM #{table_name("common_setting")} WHERE skey = 'extcredits' LIMIT 1",
+      ).first
+    raise "Discuz extcredit definitions are missing from the source snapshot" unless row
+
+    definitions = PHP.unserialize(row["value"].to_s)
+    raise "Discuz extcredit definitions could not be decoded" unless definitions.is_a?(Hash)
+
+    @discuz_credit_types =
+      definitions.each_with_object({}) do |(id, definition), result|
+        credit_id = id.to_i
+        next unless credit_id.between?(1, 8) && definition.is_a?(Hash)
+
+        definition = definition.transform_keys(&:to_s)
+        result[credit_id] = {
+          title: definition["title"].to_s.strip,
+          unit: definition["unit"].to_s.strip,
+        }
+      end
+  end
+
+  def unserialize_discuz_ids(value)
+    parsed = PHP.unserialize(value.to_s)
+    values = parsed.is_a?(Hash) ? parsed.values : Array(parsed)
+    values
+      .filter_map do |item|
+        text = item.to_s
+        text.to_i if text.match?(/\A\d+\z/) && text.to_i.positive?
+      end
+      .uniq
+      .sort
+  rescue StandardError => error
+    raise "Discuz dc_sell group/forum settings could not be decoded (#{error.class})"
+  end
+
+  def import_discuz_sell_financials!
+    settings = import_discuz_sell_settings!
+    raise "Discuz dc_sell settings are missing from the source snapshot" unless settings
+
+    SiteSetting.discourse_discuz_bbcode_sell_purchase_enabled = false
+    references = @sample_manifest ? sample_referenced_uid_union : source_referenced_uid_union
+    member_union = source_member_union
+    credit_columns =
+      (1..8).map { |id| "COALESCE(counts.extcredits#{id}, 0) extcredits#{id}" }.join(", ")
+    sql = <<~SQL
+      SELECT refs.uid, members.groupid group_id, #{credit_columns}
+        FROM (#{references}) refs
+        LEFT JOIN (#{member_union}) members USING(uid)
+        LEFT JOIN #{table_name("common_member_count")} counts USING(uid)
+       WHERE refs.uid > 0
+       ORDER BY refs.uid
+    SQL
+
+    imported_members = 0
+    now = Time.current
+    mysql_query(sql).each_slice(500) do |source_rows|
+      uids = source_rows.map { |row| row["uid"].to_i }
+      uid_fields =
+        UserCustomField.where(name: "import_id", value: uids.map(&:to_s)).pluck(:value, :user_id)
+      users_by_uid = uid_fields.group_by { |uid, _user_id| uid.to_i }
+      target_user_ids = uid_fields.map { |_uid, user_id| user_id.to_i }.uniq
+      source_by_user =
+        UserCustomField
+          .where(user_id: target_user_ids, name: "discuz_source")
+          .pluck(:user_id, :value)
+          .to_h
+      uid_by_user =
+        UserCustomField
+          .where(user_id: target_user_ids, name: "discuz_uid")
+          .pluck(:user_id, :value)
+          .to_h
+      placeholder_by_user =
+        UserCustomField
+          .where(user_id: target_user_ids, name: "discuz_missing_bbs_member")
+          .pluck(:user_id, :value)
+          .to_h
+      group_fields = []
+      balance_rows = []
+
+      source_rows.each do |row|
+        uid = row["uid"].to_i
+        matches = users_by_uid.fetch(uid, [])
+        user_id = matches.first&.last&.to_i
+        valid_discuz_user =
+          matches.length == 1 && source_by_user[user_id] == DISCUZ_SOURCE &&
+            uid_by_user[user_id].to_s == uid.to_s
+        valid_placeholder = matches.length == 1 && placeholder_by_user[user_id].to_s == "true"
+        unless valid_discuz_user || valid_placeholder
+          raise "Discuz credit balance references UID #{uid} without one imported account"
+        end
+
+        next if row["group_id"].blank?
+        unless valid_discuz_user
+          raise "Discuz group mapping for UID #{uid} does not point to a real imported account"
+        end
+
+        group_fields << {
+          user_id: user_id,
+          name: "discuz_group_id",
+          value: row["group_id"].to_s,
+          created_at: now,
+          updated_at: now,
+        }
+        (1..8).each do |credit_id|
+          balance_rows << {
+            user_id: user_id,
+            credit_id: credit_id,
+            balance: row["extcredits#{credit_id}"].to_i,
+            created_at: now,
+            updated_at: now,
+          }
+        end
+      end
+
+      ActiveRecord::Base.transaction do
+        UserCustomField.where(user_id: target_user_ids, name: "discuz_group_id").delete_all
+        UserCustomField.insert_all!(group_fields) if group_fields.any?
+        DiscourseDiscuzBbcode::SellCreditBalance.where(user_id: target_user_ids).delete_all
+        DiscourseDiscuzBbcode::SellCreditBalance.insert_all!(balance_rows) if balance_rows.any?
+      end
+      imported_members += group_fields.length
+    end
+
+    SiteSetting.discourse_discuz_bbcode_sell_purchase_enabled = settings[:source_open]
+    puts(
+      "Discuz virtual-credit balances imported for #{imported_members} source users; " \
+        "sell purchase enabled: #{SiteSetting.discourse_discuz_bbcode_sell_purchase_enabled}",
+    )
+  end
+
+  def import_discuz_sell_sections
+    sell_settings = import_discuz_sell_settings!
+    source_ids = source_sell_post_ids
+    if source_ids.empty?
+      puts "Discuz sell sections imported: 0; historical purchases imported: 0"
+      return
+    end
+    raise "Discuz dc_sell settings are missing from the source snapshot" unless sell_settings
+
+    credit_types = source_discuz_credit_types
+    imported_posts =
+      PostCustomField
+        .where(name: "import_id", value: source_ids.map(&:to_s))
+        .pluck(:value, :post_id)
+        .to_h
+    missing_posts = source_ids.map(&:to_s).to_set - imported_posts.keys.to_set
+    if missing_posts.any?
+      raise "cannot import Discuz sell sections: #{missing_posts.length} source posts are not imported"
+    end
+
+    section_keys = Set.new
+    valid_log_ids = []
+    buyer_uids = Set.new
+    orphan_log_count = 0
+
+    source_ids.each_slice(250) do |pid_batch|
+      rows = source_sell_post_rows(pid_batch)
+      section_authors = {}
+      rows.each do |row|
+        pid = row["pid"].to_i
+        _sanitized_raw, parsed_sections =
+          DiscourseDiscuzBbcode::SellTagParser.extract(row["message"], discuz_pid: pid)
+        if parsed_sections.empty?
+          raise "source Discuz sell tag has no complete section in post #{pid}"
+        end
+
+        parsed_sections.each do |section|
+          key = [pid, section.fetch(:section_index)]
+          section_keys << key
+          section_authors[key] = row["authorid"].to_i
+        end
+      end
+
+      source_logs =
+        mysql_query(
+          "SELECT id, pid, cid, uid, authorid FROM #{table_name("dc_sell_log")} " \
+            "WHERE pid IN (#{pid_batch.join(",")}) ORDER BY id",
+        ).to_a
+      source_logs.each do |row|
+        key = [row["pid"].to_i, row["cid"].to_i]
+        uid = row["uid"].to_i
+        unless section_authors.key?(key) && uid.positive?
+          orphan_log_count += 1
+          next
+        end
+        if row["authorid"].to_i.positive? && row["authorid"].to_i != section_authors.fetch(key)
+          raise "dc_sell purchase author mismatch for source log #{row["id"]}"
+        end
+
+        valid_log_ids << row["id"].to_i
+        buyer_uids << uid
+      end
+    end
+
+    if @sample_manifest
+      declared_section_ids =
+        @sample_manifest
+          .fetch("sell_section_ids", section_keys.to_a)
+          .map { |pair| pair.map(&:to_i) }
+          .to_set
+      unless declared_section_ids == section_keys
+        raise "sample manifest Discuz sell section IDs do not match source content"
+      end
+      declared_log_ids = @sample_manifest.fetch("sell_log_ids", valid_log_ids).map(&:to_i).to_set
+      unless declared_log_ids == valid_log_ids.to_set
+        raise "sample manifest dc_sell purchase IDs do not match selected sell sections"
+      end
+      declared_buyers =
+        @sample_manifest.fetch("sell_buyer_uids", buyer_uids.to_a).map(&:to_i).to_set
+      unless declared_buyers == buyer_uids
+        raise "sample manifest dc_sell buyer UIDs do not match purchase records"
+      end
+    end
+
+    source_ids.each_slice(250) do |pid_batch|
+      rows = source_sell_post_rows(pid_batch)
+      section_attributes = []
+      section_authors = {}
+
+      rows.each do |row|
+        pid = row["pid"].to_i
+        post_id = imported_posts.fetch(pid.to_s).to_i
+        post = Post.unscoped.find(post_id)
+        unless post.custom_fields["import_id"].to_s == pid.to_s && post.user_id.present?
+          raise "target Discuz post mapping is inconsistent for source post #{pid}"
+        end
+
+        _sanitized_raw, parsed_sections =
+          DiscourseDiscuzBbcode::SellTagParser.extract(row["message"], discuz_pid: pid)
+        parsed_sections.each do |section|
+          aids = section.fetch(:body).scan(%r{\[attach\](\d+)\[/attach\]}i).flatten.map(&:to_i).uniq
+          section_attributes << {
+            discuz_pid: pid,
+            section_index: section.fetch(:section_index),
+            post_id: post.id,
+            author_uid: row["authorid"].to_i,
+            author_user_id: post.user_id,
+            discuz_fid: row["fid"].to_i,
+            price: section.fetch(:price),
+            credit_id: section.fetch(:credit_id),
+            credit_title:
+              credit_types.dig(section.fetch(:credit_id), :title).presence ||
+                "积分 #{section.fetch(:credit_id)}",
+            credit_unit: credit_types.dig(section.fetch(:credit_id), :unit).to_s,
+            body: process_discuzx_post(section.fetch(:body), pid, extract_sell_sections: false),
+            attachment_aids: aids,
+          }
+          section_authors[[pid, section.fetch(:section_index)]] = row["authorid"].to_i
+        end
+      end
+
+      source_logs =
+        mysql_query(
+          "SELECT id, pid, cid, uid, dateline, pay, extcredit, authorid, authorincome " \
+            "FROM #{table_name("dc_sell_log")} WHERE pid IN (#{pid_batch.join(",")}) ORDER BY id",
+        ).to_a
+      valid_logs =
+        source_logs.select do |row|
+          section_authors.key?([row["pid"].to_i, row["cid"].to_i]) && row["uid"].to_i.positive?
+        end
+      uids = valid_logs.map { |row| row["uid"].to_i }.uniq
+      uid_field_rows =
+        UserCustomField.where(name: "import_id", value: uids.map(&:to_s)).pluck(:value, :user_id)
+      user_ids_by_uid = uid_field_rows.group_by { |uid, _user_id| uid.to_i }
+      target_user_ids = uid_field_rows.map(&:last).uniq
+      source_by_user =
+        UserCustomField
+          .where(user_id: target_user_ids, name: "discuz_source")
+          .pluck(:user_id, :value)
+          .to_h
+      discuz_uid_by_user =
+        UserCustomField
+          .where(user_id: target_user_ids, name: "discuz_uid")
+          .pluck(:user_id, :value)
+          .to_h
+      placeholder_by_user =
+        UserCustomField
+          .where(user_id: target_user_ids, name: "discuz_missing_bbs_member")
+          .pluck(:user_id, :value)
+          .to_h
+      buyer_user_by_uid = {}
+      uids.each do |uid|
+        matches = user_ids_by_uid.fetch(uid, [])
+        target_user_id = matches.first&.last&.to_i
+        valid_discuz_user =
+          matches.length == 1 && source_by_user[target_user_id] == DISCUZ_SOURCE &&
+            discuz_uid_by_user[target_user_id].to_s == uid.to_s
+        valid_placeholder =
+          matches.length == 1 && placeholder_by_user[target_user_id].to_s == "true"
+        unless valid_discuz_user || valid_placeholder
+          raise "dc_sell purchase references buyer UID #{uid} without one imported Discuz account"
+        end
+        buyer_user_by_uid[uid] = target_user_id
+      end
+
+      purchase_attributes =
+        valid_logs.map do |row|
+          key = [row["pid"].to_i, row["cid"].to_i]
+          author_uid = section_authors.fetch(key)
+          if row["authorid"].to_i.positive? && row["authorid"].to_i != author_uid
+            raise "dc_sell purchase author mismatch for source log #{row["id"]}"
+          end
+
+          {
+            source_log_id: row["id"].to_i,
+            discuz_pid: key.first,
+            section_index: key.last,
+            discuz_uid: row["uid"].to_i,
+            user_id: buyer_user_by_uid.fetch(row["uid"].to_i),
+            paid_amount: row["pay"].to_i,
+            credit_id: row["extcredit"].to_i,
+            author_uid: author_uid,
+            author_income: row["authorincome"].to_i,
+            purchased_at: row["dateline"].to_i,
+          }
+        end
+
+      now = Time.current
+      section_attributes.each { |attributes| attributes.merge!(created_at: now, updated_at: now) }
+      purchase_attributes.each { |attributes| attributes.merge!(created_at: now, updated_at: now) }
+
+      ActiveRecord::Base.transaction do
+        DiscourseDiscuzBbcode::SellPurchase.where(discuz_pid: pid_batch).delete_all
+        DiscourseDiscuzBbcode::SellSection.where(discuz_pid: pid_batch).delete_all
+        if section_attributes.any?
+          DiscourseDiscuzBbcode::SellSection.insert_all!(section_attributes)
+        end
+        if purchase_attributes.any?
+          DiscourseDiscuzBbcode::SellPurchase.insert_all!(purchase_attributes)
+        end
+      end
+    end
+
+    puts "Discuz sell sections imported: #{section_keys.length}"
+    puts "Discuz historical purchase records imported: #{valid_log_ids.length}"
+    puts "Unmatched source purchase rows skipped: #{orphan_log_count}" if orphan_log_count.positive?
   end
 
   def replace_internal_link(

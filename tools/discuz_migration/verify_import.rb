@@ -3,6 +3,7 @@
 
 require "json"
 require "mysql2"
+require "php_serialize"
 require_relative "category_permissions"
 require_relative "category_eligibility"
 require_relative "medals"
@@ -13,6 +14,9 @@ class DiscuzImportVerifier
   ALLOWED_SAMPLE_DATABASES = %w[
     discourse_migration_sample
     discourse_migration_sample_uid18_20261013
+    discourse_migration_sell_sample_20261018
+    discourse_migration_sell_preview_20261018
+    discourse_migration_sell_public_preview_20261018
   ].freeze
 
   def initialize
@@ -58,6 +62,8 @@ class DiscuzImportVerifier
         :attachments
       elsif ARGV.include?("--sample-medals")
         :medals
+      elsif ARGV.include?("--sample-sell")
+        :sell
       elsif ARGV.include?("--sample-acceptance")
         :acceptance
       end
@@ -72,6 +78,8 @@ class DiscuzImportVerifier
           verify_sample_attachments
         elsif sample_stage == :medals
           verify_discuz_medals(@sample_manifest.fetch("member_uids"), mode: "sample_discuz_medals")
+        elsif sample_stage == :sell
+          verify_sample_sell
         elsif sample_stage
           verify_sample(sample_stage)
         else
@@ -112,12 +120,27 @@ class DiscuzImportVerifier
       pm_message_ids
       placeholder_uids
       required_uids
+      sell_post_ids
+      sell_log_ids
+      sell_buyer_uids
     ].each do |key|
+      next unless manifest.key?(key)
+
       ids = manifest.fetch(key)
       unless ids.is_a?(Array) && ids.all? { |id| id.is_a?(Integer) && id.positive? } &&
                ids.uniq.length == ids.length
         raise "invalid sample manifest IDs for #{key}"
       end
+    end
+    if manifest.key?("sell_section_ids")
+      pairs = manifest.fetch("sell_section_ids")
+      valid_pairs =
+        pairs.is_a?(Array) &&
+          pairs.all? do |pair|
+            pair.is_a?(Array) && pair.length == 2 &&
+              pair.all? { |id| id.is_a?(Integer) && id >= 0 } && pair.first.positive?
+          end && pairs.uniq.length == pairs.length
+      raise "invalid sample manifest IDs for sell_section_ids" unless valid_pairs
     end
     manifest
   rescue Errno::ENOENT
@@ -125,7 +148,7 @@ class DiscuzImportVerifier
   end
 
   def sample_id_sql(key)
-    ids = @sample_manifest.fetch(key).map(&:to_i)
+    ids = @sample_manifest.fetch(key, []).map(&:to_i)
     ids.empty? ? "0" : ids.join(",")
   end
 
@@ -220,6 +243,12 @@ class DiscuzImportVerifier
       if stage == :acceptance
         verify_discuz_medals(@sample_manifest.fetch("member_uids"), mode: "sample_discuz_medals")
       end
+    sell_report =
+      if stage == :acceptance && @sample_manifest.key?("sell_section_ids")
+        verify_sample_sell
+      elsif @sample_manifest.key?("sell_section_ids")
+        { status: "deferred_until_sample_sell_stage" }
+      end
     content_reports =
       if stage == :acceptance
         [
@@ -255,6 +284,7 @@ class DiscuzImportVerifier
       password_report[:failure_count],
       sample_source_integrity[:mismatch_count],
       medal_report&.dig(:acceptance, :failure_count),
+      sell_report&.dig(:acceptance, :failure_count),
     ]
     core_failures.compact!
     if post_report && pm_report
@@ -309,6 +339,7 @@ class DiscuzImportVerifier
       posts: post_report || { status: "deferred_until_sample_content_stage" },
       private_messages: pm_report || { status: "deferred_until_sample_content_stage" },
       medals: medal_report || { status: "deferred_until_sample_medal_stage" },
+      paid_sections: sell_report || { status: "deferred_until_sample_sell_stage" },
       acceptance: {
         status:
           (
@@ -488,6 +519,461 @@ class DiscuzImportVerifier
         source_reference_issue_count: source_reference_issue_count,
       },
     }
+  end
+
+  def verify_sample_sell
+    unless @sample_manifest&.key?("sell_section_ids")
+      raise "paid-section verification requires a sell sample manifest"
+    end
+
+    manifest_post_ids = @sample_manifest.fetch("post_ids").map(&:to_i)
+    candidates =
+      rows(
+        "SELECT post.pid, post.tid, post.authorid, post.message, COALESCE(thread.fid, 0) fid " \
+          "FROM #{bbs("forum_post")} post " \
+          "LEFT JOIN #{bbs("forum_thread")} thread ON thread.tid = post.tid " \
+          "WHERE post.pid IN (#{sample_id_sql("post_ids")}) " \
+          "AND LOCATE('[sell', LOWER(post.message)) > 0 ORDER BY post.pid",
+      )
+    source_sections = {}
+    source_authors = {}
+    sanitized_source_by_pid = {}
+    candidates.each do |row|
+      pid = row["pid"].to_i
+      sanitized, parsed =
+        DiscourseDiscuzBbcode::SellTagParser.extract(row["message"], discuz_pid: pid)
+      next if parsed.empty?
+
+      source_authors[pid] = row["authorid"].to_i
+      sanitized_source_by_pid[pid] = sanitized
+      parsed.each do |section|
+        key = [pid, section.fetch(:section_index)]
+        source_sections[key] = {
+          author_uid: row["authorid"].to_i,
+          discuz_fid: row["fid"].to_i,
+          price: section.fetch(:price),
+          credit_id: section.fetch(:credit_id),
+          body: section.fetch(:body),
+          attachment_aids:
+            section
+              .fetch(:body)
+              .scan(%r{\[attach\](\d+)\[/attach\]}i)
+              .flatten
+              .map(&:to_i)
+              .uniq
+              .sort,
+        }
+      end
+    end
+
+    source_sell_post_ids = source_sections.keys.map(&:first).uniq.sort
+    declared_sell_post_ids = @sample_manifest.fetch("sell_post_ids").map(&:to_i).sort
+    source_section_ids = source_sections.keys.sort
+    declared_section_ids =
+      @sample_manifest.fetch("sell_section_ids").map { |pair| pair.map(&:to_i) }.sort
+    source_logs =
+      if source_sell_post_ids.empty?
+        []
+      else
+        rows(
+          "SELECT id, pid, cid, uid, dateline, pay, extcredit, authorid, authorincome " \
+            "FROM #{bbs("dc_sell_log")} WHERE pid IN (#{source_sell_post_ids.join(",")}) ORDER BY id",
+        )
+      end
+    valid_logs =
+      source_logs.select do |row|
+        key = [row["pid"].to_i, row["cid"].to_i]
+        section = source_sections[key]
+        next false unless section && row["uid"].to_i.positive?
+        if row["authorid"].to_i.positive? && row["authorid"].to_i != section[:author_uid]
+          raise "source paid-section purchase author mismatch"
+        end
+        true
+      end
+    source_log_ids = valid_logs.map { |row| row["id"].to_i }.sort
+    declared_log_ids = @sample_manifest.fetch("sell_log_ids").map(&:to_i).sort
+    source_buyer_uids = valid_logs.map { |row| row["uid"].to_i }.uniq.sort
+    declared_buyer_uids = @sample_manifest.fetch("sell_buyer_uids").map(&:to_i).sort
+    source_attachment_rows =
+      source_sections
+        .flat_map do |(pid, section_index), section|
+          section[:attachment_aids].map do |aid|
+            { "discuz_pid" => pid, "section_index" => section_index, "aid" => aid }
+          end
+        end
+        .sort_by { |row| [row["discuz_pid"], row["section_index"], row["aid"]] }
+    declared_attachments = @sample_manifest.fetch("sell_attachment_aids", [])
+    declared_attachments =
+      declared_attachments.sort_by do |row|
+        [row.fetch("discuz_pid").to_i, row.fetch("section_index").to_i, row.fetch("aid").to_i]
+      end
+
+    post_import_rows =
+      PostCustomField.where(name: "import_id", value: source_sell_post_ids.map(&:to_s)).pluck(
+        :value,
+        :post_id,
+      )
+    post_by_source_id =
+      post_import_rows.to_h do |source_id, target_id|
+        [source_id.to_i, Post.with_deleted.find_by(id: target_id)]
+      end
+    target_sections =
+      ::DiscourseDiscuzBbcode::SellSection
+        .where(discuz_pid: source_sell_post_ids)
+        .order(:discuz_pid, :section_index)
+        .to_a
+    target_by_key =
+      target_sections.index_by { |section| [section.discuz_pid.to_i, section.section_index.to_i] }
+    target_purchases =
+      ::DiscourseDiscuzBbcode::SellPurchase
+        .where(source_log_id: source_log_ids)
+        .order(:source_log_id)
+        .to_a
+    target_purchase_by_log = target_purchases.index_by { |purchase| purchase.source_log_id.to_i }
+    user_imports =
+      UserCustomField
+        .where(
+          name: "import_id",
+          value: (source_buyer_uids + source_authors.values).uniq.map(&:to_s),
+        )
+        .pluck(:value, :user_id)
+        .to_h { |source_uid, user_id| [source_uid.to_i, user_id.to_i] }
+
+    post_marker_mismatches = 0
+    leaked_body_count = 0
+    author_mapping_mismatches = 0
+    marker_issue_keys = []
+    possible_leak_section_keys = []
+    source_sections.each do |(pid, section_index), source_section|
+      post = post_by_source_id[pid]
+      unless post
+        post_marker_mismatches += 1
+        marker_issue_keys << [pid, section_index, "post_missing"]
+        next
+      end
+      marker = DiscourseDiscuzBbcode::SellTagParser.marker(pid, section_index)
+      marker_count = post.raw.scan(Regexp.new(Regexp.escape(marker), Regexp::IGNORECASE)).length
+      has_sell_open = post.raw.match?(/\[sell\s*=/i)
+      if marker_count != 1 || has_sell_open
+        post_marker_mismatches += 1
+        marker_issue_keys << [pid, section_index, marker_count, has_sell_open]
+      end
+      if source_section[:body].strip.length >= 24 && post.raw.include?(source_section[:body]) &&
+           !sanitized_source_by_pid.fetch(pid).include?(source_section[:body])
+        leaked_body_count += 1
+        possible_leak_section_keys << [pid, section_index, source_section[:body].bytesize]
+      end
+      target = target_by_key[[pid, section_index]]
+      next unless target
+      expected_author_user_id = user_imports[source_section[:author_uid]]
+      author_mapping_mismatches += 1 if target.author_uid.to_i != source_section[:author_uid]
+      author_mapping_mismatches += 1 if target.author_user_id.to_i != post.user_id.to_i
+      author_mapping_mismatches += 1 if expected_author_user_id &&
+        post.user_id.to_i != expected_author_user_id
+    end
+
+    section_field_mismatches = 0
+    source_sections.each do |key, source_section|
+      target = target_by_key[key]
+      next unless target
+      section_field_mismatches += 1 if target.price.to_i != source_section[:price]
+      section_field_mismatches += 1 if target.credit_id.to_i != source_section[:credit_id]
+      section_field_mismatches += 1 if target.discuz_fid.to_i != source_section[:discuz_fid]
+      credit_type = source_discuz_credit_types[source_section[:credit_id]] || {}
+      expected_title = credit_type[:title].presence || "积分 #{source_section[:credit_id]}"
+      section_field_mismatches += 1 if target.credit_title.to_s != expected_title
+      section_field_mismatches += 1 if target.credit_unit.to_s != credit_type[:unit].to_s
+      section_field_mismatches += 1 if Array(target.attachment_aids).map(&:to_i).uniq.sort !=
+        source_section[:attachment_aids]
+      section_field_mismatches += 1 if target.body.blank?
+    end
+
+    purchase_field_mismatches = 0
+    valid_logs.each do |source_log|
+      target = target_purchase_by_log[source_log["id"].to_i]
+      unless target
+        purchase_field_mismatches += 1
+        next
+      end
+      source_uid = source_log["uid"].to_i
+      source_pid = source_log["pid"].to_i
+      source_cid = source_log["cid"].to_i
+      expected_author_uid = source_sections.fetch([source_pid, source_cid]).fetch(:author_uid)
+      target_user_id = user_imports[source_uid]
+      purchase_field_mismatches += 1 if target.discuz_uid.to_i != source_uid
+      purchase_field_mismatches += 1 if target.user_id.to_i != target_user_id.to_i
+      purchase_field_mismatches += 1 if target.discuz_pid.to_i != source_pid
+      purchase_field_mismatches += 1 if target.section_index.to_i != source_cid
+      purchase_field_mismatches += 1 if target.author_uid.to_i != expected_author_uid
+      purchase_field_mismatches += 1 if target.paid_amount.to_i != source_log["pay"].to_i
+      purchase_field_mismatches += 1 if target.credit_id.to_i != source_log["extcredit"].to_i
+      purchase_field_mismatches += 1 if target.author_income.to_i != source_log["authorincome"].to_i
+      purchase_field_mismatches += 1 if target.purchased_at.to_i != source_log["dateline"].to_i
+    end
+
+    target_attachment_aids =
+      target_sections.flat_map { |section| Array(section.attachment_aids).map(&:to_i) }.uniq
+    imported_attachment_aids =
+      ::DiscourseDiscuzBbcode::Attachment
+        .where(aid: target_attachment_aids)
+        .pluck(:aid)
+        .map(&:to_i)
+        .to_set
+    missing_attachment_metadata_count =
+      (target_attachment_aids.to_set - imported_attachment_aids).length
+
+    permission_matrix =
+      verify_sell_access_matrix(target_sections, target_purchases, post_by_source_id)
+    manifest_mismatch_count =
+      symmetric_difference_count(source_sell_post_ids, declared_sell_post_ids) +
+        symmetric_difference_count(source_section_ids, declared_section_ids) +
+        symmetric_difference_count(source_log_ids, declared_log_ids) +
+        symmetric_difference_count(source_buyer_uids, declared_buyer_uids) +
+        (source_attachment_rows == declared_attachments ? 0 : 1) +
+        (manifest_post_ids.include?(@sample_manifest.fetch("sell_candidate_post_id").to_i) ? 0 : 1)
+    target_count_mismatches =
+      symmetric_difference_count(source_section_ids, target_by_key.keys.sort) +
+        symmetric_difference_count(source_log_ids, target_purchase_by_log.keys.sort)
+    financial_import = verify_sell_financial_import(@sample_manifest.fetch("member_uids"))
+    failure_count =
+      manifest_mismatch_count + target_count_mismatches + post_marker_mismatches +
+        leaked_body_count + author_mapping_mismatches + section_field_mismatches +
+        purchase_field_mismatches + missing_attachment_metadata_count +
+        permission_matrix[:failure_count] + financial_import[:failure_count]
+
+    {
+      mode: "sample_discuz_paid_sections",
+      source_sell_post_count: source_sell_post_ids.length,
+      source_section_count: source_sections.length,
+      source_valid_purchase_count: source_log_ids.length,
+      source_orphan_purchase_count: source_logs.length - valid_logs.length,
+      source_buyer_count: source_buyer_uids.length,
+      protected_attachment_count: target_attachment_aids.length,
+      target_section_count: target_sections.length,
+      target_purchase_count: target_purchases.length,
+      manifest_mismatch_count: manifest_mismatch_count,
+      target_count_mismatches: target_count_mismatches,
+      post_marker_mismatches: post_marker_mismatches,
+      post_marker_issue_keys: marker_issue_keys,
+      possible_plain_body_leaks: leaked_body_count,
+      possible_plain_body_leak_section_keys: possible_leak_section_keys,
+      author_mapping_mismatches: author_mapping_mismatches,
+      section_field_mismatches: section_field_mismatches,
+      purchase_field_mismatches: purchase_field_mismatches,
+      missing_protected_attachment_metadata: missing_attachment_metadata_count,
+      financial_import: financial_import.except(:failure_count),
+      access_matrix: permission_matrix[:results],
+      acceptance: {
+        status: failure_count.zero? ? "passed" : "failed",
+        failure_count: failure_count,
+      },
+    }
+  end
+
+  def verify_sell_access_matrix(sections, purchases, posts_by_source_id)
+    section =
+      sections.find do |candidate|
+        purchases.any? do |purchase|
+          purchase.discuz_pid.to_i == candidate.discuz_pid.to_i &&
+            purchase.section_index.to_i == candidate.section_index.to_i
+        end
+      end
+    unless section
+      return { failure_count: 1, results: { status: "no_purchased_section_available" } }
+    end
+
+    guardian_class =
+      Struct.new(:staff) do
+        def is_staff?
+          staff
+        end
+      end
+    purchase =
+      purchases.find do |candidate|
+        candidate.discuz_pid.to_i == section.discuz_pid.to_i &&
+          candidate.section_index.to_i == section.section_index.to_i
+      end
+    author = posts_by_source_id[section.discuz_pid.to_i]&.user
+    buyer = User.find_by(id: purchase.user_id)
+    purchaser_ids =
+      purchases
+        .select do |candidate|
+          candidate.discuz_pid.to_i == section.discuz_pid.to_i &&
+            candidate.section_index.to_i == section.section_index.to_i
+        end
+        .map(&:user_id)
+        .compact
+        .to_set
+    free_group_ids =
+      DiscourseDiscuzBbcode::SellAccess.parse_ids(
+        SiteSetting.discourse_discuz_bbcode_sell_free_group_ids,
+      )
+    unrelated_candidates =
+      UserCustomField
+        .where(name: "discuz_source", value: "discuz_x3.5")
+        .where.not(user_id: purchaser_ids.to_a + [author&.id].compact)
+    free_group_user_ids =
+      UserCustomField.where(name: "discuz_group_id", value: free_group_ids.map(&:to_s)).select(
+        :user_id,
+      )
+    unrelated_id =
+      unrelated_candidates.where.not(user_id: free_group_user_ids).limit(1).pick(:user_id)
+    unrelated = User.find_by(id: unrelated_id) if unrelated_id
+    guardian = guardian_class.new(false)
+    results = {
+      anonymous_denied: !DiscourseDiscuzBbcode::SellAccess.allowed?(section, nil, guardian),
+      author_allowed:
+        author && DiscourseDiscuzBbcode::SellAccess.allowed?(section, author, guardian),
+      buyer_allowed: buyer && DiscourseDiscuzBbcode::SellAccess.allowed?(section, buyer, guardian),
+      unrelated_user_denied:
+        unrelated && !DiscourseDiscuzBbcode::SellAccess.allowed?(section, unrelated, guardian),
+      staff_allowed:
+        DiscourseDiscuzBbcode::SellAccess.allowed?(section, nil, guardian_class.new(true)),
+    }
+    required_results = results.reject { |key, _| key == :unrelated_user_denied }
+    failure_count = required_results.count { |_key, value| value != true }
+    failure_count += 1 if unrelated && results[:unrelated_user_denied] != true
+    { failure_count: failure_count, results: results }
+  end
+
+  def verify_sell_financial_import(source_uids)
+    source_settings_rows =
+      rows(
+        "SELECT variable, value FROM #{bbs("common_pluginvar")} " \
+          "WHERE pluginid = (SELECT pluginid FROM #{bbs("common_plugin")} " \
+          "WHERE identifier = 'dc_sell' LIMIT 1) " \
+          "AND variable IN ('open', 'fids', 'free', 'maxprice', 'salestax')",
+      )
+    source_settings = source_settings_rows.to_h { |row| [row["variable"], row["value"]] }
+    source_open = source_settings.fetch("open", "0").to_i == 1
+    expected_tax = source_settings.fetch("salestax", "0").to_i
+    expected_max_price = source_settings.fetch("maxprice", "100").to_i
+    expected_free_group_ids = unserialize_discuz_ids(source_settings.fetch("free", ""))
+    expected_forum_ids = unserialize_discuz_ids(source_settings.fetch("fids", ""))
+    settings_mismatches = 0
+    settings_mismatches += 1 if !SiteSetting.discourse_discuz_bbcode_sell_source_configured
+    settings_mismatches += 1 if SiteSetting.discourse_discuz_bbcode_sell_source_open != source_open
+    settings_mismatches += 1 if SiteSetting.discourse_discuz_bbcode_sell_purchase_enabled !=
+      source_open
+    settings_mismatches += 1 if SiteSetting.discourse_discuz_bbcode_sell_tax_percent.to_i !=
+      expected_tax
+    settings_mismatches += 1 if SiteSetting.discourse_discuz_bbcode_sell_max_price.to_i !=
+      expected_max_price
+    settings_mismatches += 1 if DiscourseDiscuzBbcode::SellAccess.parse_ids(
+      SiteSetting.discourse_discuz_bbcode_sell_free_group_ids,
+    ) != expected_free_group_ids
+    settings_mismatches += 1 if DiscourseDiscuzBbcode::SellAccess.parse_ids(
+      SiteSetting.discourse_discuz_bbcode_sell_forum_ids,
+    ) != expected_forum_ids
+
+    uids = source_uids.map(&:to_i).select(&:positive?).uniq
+    if uids.empty?
+      return(
+        {
+          failure_count: settings_mismatches + 1,
+          source_user_count: 0,
+          balance_mismatches: 0,
+          group_mismatches: 0,
+          settings_mismatches: settings_mismatches,
+        }
+      )
+    end
+
+    credit_columns =
+      (1..8).map { |id| "COALESCE(counts.extcredits#{id}, 0) extcredits#{id}" }.join(", ")
+    source_rows =
+      rows(
+        "SELECT members.uid, members.groupid group_id, #{credit_columns} " \
+          "FROM (SELECT uid, groupid FROM #{bbs("common_member")} " \
+          "UNION ALL SELECT archived.uid, archived.groupid FROM #{bbs("common_member_archive")} archived " \
+          "WHERE NOT EXISTS (SELECT 1 FROM #{bbs("common_member")} active " \
+          "WHERE active.uid = archived.uid)) members " \
+          "LEFT JOIN #{bbs("common_member_count")} counts USING(uid) " \
+          "WHERE members.uid IN (#{uids.join(",")}) ORDER BY members.uid",
+      )
+    source_by_uid = source_rows.index_by { |row| row["uid"].to_i }
+    imports =
+      UserCustomField.where(name: "import_id", value: uids.map(&:to_s)).pluck(:value, :user_id)
+    target_by_uid = imports.group_by { |source_uid, _user_id| source_uid.to_i }
+    target_user_ids = imports.map { |_source_uid, user_id| user_id.to_i }.uniq
+    target_balances =
+      ::DiscourseDiscuzBbcode::SellCreditBalance
+        .where(user_id: target_user_ids)
+        .pluck(:user_id, :credit_id, :balance)
+        .to_h { |user_id, credit_id, balance| [[user_id.to_i, credit_id.to_i], balance.to_i] }
+    target_groups =
+      UserCustomField
+        .where(user_id: target_user_ids, name: "discuz_group_id")
+        .pluck(:user_id, :value)
+        .to_h { |user_id, group_id| [user_id.to_i, group_id.to_i] }
+    balance_mismatches = 0
+    group_mismatches = 0
+
+    source_by_uid.each do |uid, source_row|
+      matches = target_by_uid.fetch(uid, [])
+      if matches.length != 1
+        balance_mismatches += 8
+        group_mismatches += 1
+        next
+      end
+
+      user_id = matches.first.last.to_i
+      group_mismatches += 1 if target_groups[user_id].to_i != source_row["group_id"].to_i
+      (1..8).each do |credit_id|
+        expected = source_row["extcredits#{credit_id}"].to_i
+        actual = target_balances[[user_id, credit_id]]
+        balance_mismatches += 1 if actual != expected
+      end
+    end
+
+    {
+      failure_count: settings_mismatches + balance_mismatches + group_mismatches,
+      source_user_count: source_by_uid.length,
+      balance_mismatches: balance_mismatches,
+      group_mismatches: group_mismatches,
+      settings_mismatches: settings_mismatches,
+    }
+  end
+
+  def source_discuz_credit_types
+    return @source_discuz_credit_types if defined?(@source_discuz_credit_types)
+
+    row =
+      rows("SELECT svalue FROM #{bbs("common_setting")} WHERE skey = 'extcredits' LIMIT 1").first
+    definitions = row && PHP.unserialize(row["svalue"].to_s)
+    @source_discuz_credit_types =
+      if definitions.is_a?(Hash)
+        definitions.each_with_object({}) do |(id, definition), result|
+          credit_id = id.to_i
+          next unless credit_id.between?(1, 8) && definition.is_a?(Hash)
+
+          definition = definition.transform_keys(&:to_s)
+          result[credit_id] = {
+            title: definition["title"].to_s.strip,
+            unit: definition["unit"].to_s.strip,
+          }
+        end
+      else
+        {}
+      end
+  end
+
+  def unserialize_discuz_ids(value)
+    decoded = PHP.unserialize(value.to_s)
+    values = decoded.is_a?(Hash) ? decoded.values : Array(decoded)
+    values
+      .filter_map do |item|
+        text = item.to_s
+        text.to_i if text.match?(/\A\d+\z/) && text.to_i.positive?
+      end
+      .uniq
+      .sort
+  end
+
+  def symmetric_difference_count(left, right)
+    left_set = left.to_set
+    right_set = right.to_set
+    (left_set - right_set).length + (right_set - left_set).length
   end
 
   def verify_discuz_medals(source_uids, mode:)
@@ -2266,7 +2752,10 @@ class DiscuzImportVerifier
        WHERE pmtype = 1 AND min_max REGEXP '^[0-9]+_[0-9]+$'
          AND plid IN (#{sample_id_sql("pm_thread_ids")})
     SQL
-    [post_authors, pm_members, pm_authors, pm_pair_participants].join("\nUNION\n")
+    sell_buyers =
+      "SELECT DISTINCT uid FROM #{bbs("dc_sell_log")} " \
+        "WHERE uid > 0 AND uid IN (#{sample_id_sql("sell_buyer_uids")})"
+    [post_authors, pm_members, pm_authors, pm_pair_participants, sell_buyers].join("\nUNION\n")
   end
 
   def pm_message_union_sql

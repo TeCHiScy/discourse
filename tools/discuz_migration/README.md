@@ -49,6 +49,10 @@ category mappings and permissions and updates the default sidebar links; it leav
 identity, post, and message records untouched. `identity` imports users and categories,
 while `content` imports posts and private messages. `attachments` converts uploads in
 already imported posts without reimporting users, categories, topics, or messages.
+The `sell_balances` stage copies Discuz virtual-credit balances, group IDs, and `dc_sell`
+currency/tax/free-forum settings for the selected users. It does not import posts or
+messages. Re-running it intentionally resets balances to the frozen source snapshot, so
+use it before a purchase rehearsal or when restoring a clean target.
 All staged modes require `DISCUZX_SAMPLE_MANIFEST` and write only to the database pinned in
 that manifest. The sample target allowlist includes a separate UID 18 rehearsal database so
 the currently served sample remains intact during reimport.
@@ -72,6 +76,13 @@ for those existing accounts: verified, directly mapped addresses are activated a
 confirmed idempotently, while duplicate/conflict remaps remain unconfirmed. The
 acceptance verifier checks that imported Discuz members are active and that source-
 verified, directly mapped email addresses are confirmed.
+
+Discuz `dc_sell` purchases use the imported `common_member_count.extcredits1..8`
+balances. The purchase endpoint debits the buyer, credits the author after the source
+`salestax`, and records each new sale under a per-section/per-buyer uniqueness constraint.
+Historical `dc_sell_log` purchases remain separate and continue to grant access. This
+implements the source virtual-credit purchase flow; it does not add a way to buy or recharge
+credits with real money.
 
 Before any import stage writes Discuz data, the importer enables and verifies the
 site-wide `zh_CN` default locale and Unicode usernames. It then removes

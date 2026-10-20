@@ -2,3 +2,4 @@ zh_CN:
   site_settings:
     discourse_discuz_bbcode_tables_enabled: "在帖子中渲染 Discuz 表格 BBCode"
     discourse_discuz_bbcode_attachments_enabled: "在帖子中渲染 Discuz 附件 BBCode"
+    discourse_discuz_bbcode_sell_enabled: "安全渲染 Discuz 付费内容区块"

@@ -226,8 +226,8 @@ function parseLegacyTable(source) {
     return null;
   }
 
-  const rows = lines.map(splitLegacyRow);
-  const cellCount = rows.reduce((total, row) => total + row.length, 0);
+  const rows = lines.map((line) => ({ cells: splitLegacyRow(line) }));
+  const cellCount = rows.reduce((total, row) => total + row.cells.length, 0);
 
   return cellCount <= MAX_CELLS ? rows : null;
 }
@@ -276,7 +276,8 @@ export function setup(helper) {
     "td",
     "td[colspan]",
     "td[rowspan]",
-    "span.discuz-attachment[data-aid]",
+    "span[data-discuz-attachment][data-aid]",
+    "span[data-discuz-sell-section][data-pid][data-cid]",
   ]);
 
   helper.registerOptions((opts, siteSettings) => {
@@ -284,6 +285,8 @@ export function setup(helper) {
       siteSettings.discourse_discuz_bbcode_tables_enabled;
     opts.features.discuz_bbcode_attachments =
       siteSettings.discourse_discuz_bbcode_attachments_enabled;
+    opts.features.discuz_bbcode_sell =
+      siteSettings.discourse_discuz_bbcode_sell_enabled;
   });
 
   helper.registerPlugin((md) => {
@@ -330,7 +333,29 @@ export function setup(helper) {
 
       md.renderer.rules.discuz_bbcode_attachment = (tokens, index) => {
         const aid = tokens[index].content;
-        return `<span class="discuz-attachment" data-aid="${aid}">[Discuz 附件 ${aid}]</span>`;
+        return `<span data-discuz-attachment="true" data-aid="${aid}">[Discuz 附件 ${aid}]</span>`;
+      };
+    }
+
+    if (md.options.discourse.features.discuz_bbcode_sell) {
+      md.inline.bbcode.ruler.push("discuz-sell-section", {
+        tag: "discuzsell",
+
+        replace(state, _tagInfo, content) {
+          const match = content.trim().match(/^(\d+):(\d+)$/);
+          if (!match) {
+            return false;
+          }
+
+          const token = state.push("discuz_bbcode_sell_section", "", 0);
+          token.meta = { pid: match[1], cid: match[2] };
+          return true;
+        },
+      });
+
+      md.renderer.rules.discuz_bbcode_sell_section = (tokens, index) => {
+        const { pid, cid } = tokens[index].meta;
+        return `<span data-discuz-sell-section="true" data-pid="${pid}" data-cid="${cid}">付费内容</span>`;
       };
     }
   });

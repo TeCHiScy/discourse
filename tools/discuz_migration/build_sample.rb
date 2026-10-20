@@ -37,7 +37,9 @@ class DiscuzSampleBuilder
     @sample_target_database =
       ENV.fetch("DISCUZX_SAMPLE_TARGET_DATABASE", "discourse_migration_sample")
     case @sample_target_database
-    when "discourse_migration_sample", "discourse_migration_sample_uid18_20261013"
+    when "discourse_migration_sample", "discourse_migration_sample_uid18_20261013",
+         "discourse_migration_sell_sample_20261018", "discourse_migration_sell_preview_20261018",
+         "discourse_migration_sell_public_preview_20261018"
     else
       raise "sample target database is not approved"
     end

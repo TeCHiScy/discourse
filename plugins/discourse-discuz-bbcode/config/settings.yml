@@ -5,3 +5,28 @@ plugins:
   discourse_discuz_bbcode_attachments_enabled:
     default: true
     client: true
+  discourse_discuz_bbcode_sell_enabled:
+    default: true
+    client: true
+  discourse_discuz_bbcode_sell_source_open:
+    default: false
+  discourse_discuz_bbcode_sell_source_configured:
+    default: false
+  discourse_discuz_bbcode_sell_purchase_enabled:
+    default: false
+  discourse_discuz_bbcode_sell_tax_percent:
+    default: 0
+    type: integer
+    min: 0
+    max: 100
+  discourse_discuz_bbcode_sell_max_price:
+    default: 100
+    type: integer
+    min: 1
+    max: 100000000
+  discourse_discuz_bbcode_sell_free_group_ids:
+    default: ""
+    type: string
+  discourse_discuz_bbcode_sell_forum_ids:
+    default: ""
+    type: string

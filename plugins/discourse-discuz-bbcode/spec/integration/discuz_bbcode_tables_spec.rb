@@ -38,7 +38,7 @@ RSpec.describe "Discuz BBCode tables" do
   it "supports the legacy pipe-separated table syntax" do
     cooked_html = PrettyText.cook(<<~BBCode)
         [table]
-        左侧\|文字|右侧
+        左侧\\|文字|右侧
         第二行|单元格
         [/table]
       BBCode

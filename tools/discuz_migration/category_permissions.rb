@@ -6,7 +6,10 @@ module DiscuzCategoryPermissions
   GUEST_GROUP_ID = "7"
 
   def self.source_category_read_restrictions(rows, medals_enabled:)
-    rows_by_id = rows.index_by { |row| row["id"].to_i }
+    # The sample manifest builder calls this helper outside Rails/ActiveSupport.
+    # rubocop:disable Rails/IndexBy
+    rows_by_id = rows.to_h { |row| [row["id"].to_i, row] }
+    # rubocop:enable Rails/IndexBy
     cache = {}
     rows_by_id.each_value do |row|
       source_category_read_restricted?(row, rows_by_id, cache, Set.new, medals_enabled:)

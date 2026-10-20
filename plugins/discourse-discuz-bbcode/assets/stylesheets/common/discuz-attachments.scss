@@ -9,3 +9,36 @@
   display: inline-block;
   margin: 0.25em 0;
 }
+
+.discuz-attachment-list {
+  border-top: 1px solid var(--primary-low);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5em;
+  margin-top: 1em;
+  padding-top: 0.75em;
+}
+
+span[data-discuz-sell-section="true"],
+.discuz-sell-section {
+  border: 1px solid var(--primary-low);
+  border-radius: var(--d-border-radius);
+  display: block;
+  margin-block: 1em;
+  padding: 0.75em;
+}
+
+.discuz-sell-section-locked {
+  color: var(--primary-medium);
+  font-style: italic;
+}
+
+.discuz-sell-purchase-button {
+  margin-inline-start: 0.75em;
+  white-space: nowrap;
+}
+
+.discuz-sell-purchase-feedback {
+  display: block;
+  margin-top: 0.5em;
+}
