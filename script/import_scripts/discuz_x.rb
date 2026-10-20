@@ -768,6 +768,10 @@ class ImportScripts::DiscuzX < ImportScripts::Base
         custom_fields["discuz_original_email"] = source_email if (
           duplicated_email || email_conflict
         ) && source_email.present?
+        signature_raw = user["sightml"].to_s.strip
+        if signature_raw.present?
+          custom_fields["discuz_signature_html"] = PrettyText.cook(signature_raw, user_id: uid).to_s
+        end
 
         {
           id: uid,
@@ -1301,6 +1305,8 @@ class ImportScripts::DiscuzX < ImportScripts::Base
                    p.authorid user_id,
                    p.message raw,
                    p.dateline post_time,
+                   p.usesig discuz_usesig,
+                   p.anonymous discuz_anonymous,
                    p2.pid first_id,
                    p2.invisible first_post_status,
                    EXISTS (
@@ -1344,7 +1350,10 @@ class ImportScripts::DiscuzX < ImportScripts::Base
           raw: process_discuzx_post(row["raw"], row["id"]),
           created_at: Time.zone.at(row["post_time"]),
           tags: row["tags"],
+          # Preserve Discuz's per-post signature visibility behavior.
           custom_fields: {
+            "discuz_usesig" => row["discuz_usesig"].to_s.to_i == 1,
+            "discuz_anonymous" => row["discuz_anonymous"].to_s.to_i == 1,
             "discuz_invisible" => row["status"].to_i,
             "discuz_thread_displayorder" => row["thread_status"].to_i,
           },
