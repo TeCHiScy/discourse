@@ -1870,6 +1870,7 @@ class ImportScripts::DiscuzX < ImportScripts::Base
 
     attachment_regex = %r{\[attach\](\d+)\[/attach\]}
     attachment_link_regex = %r{\[x-attach\](.+)\[/x-attach\]}
+    requested_attachment_ids = requested_discuz_attachment_ids
 
     current_count = 0
     total_count =
@@ -1894,17 +1895,23 @@ class ImportScripts::DiscuzX < ImportScripts::Base
 
       new_raw.gsub!(attachment_regex) do |s|
         attachment_id = $1.to_i
+        if requested_attachment_ids.present? && !requested_attachment_ids.include?(attachment_id)
+          next s
+        end
+
         inline_attachments.push attachment_id
 
         upload, filename = find_upload(user, post, attachment_id)
         unless upload
           fail_count += 1
-          next
+          next s
         end
 
         html_for_upload(upload, filename)
       end
       new_raw.gsub!(attachment_link_regex) do |s|
+        next s if requested_attachment_ids.present?
+
         attachment_file = $1
 
         filename = File.basename(attachment_file)
@@ -1912,7 +1919,7 @@ class ImportScripts::DiscuzX < ImportScripts::Base
         upload = create_upload(user.id, path, filename) if path
         unless upload
           fail_count += 1
-          next
+          next s
         end
 
         html_for_upload(upload, filename)
@@ -1923,6 +1930,9 @@ class ImportScripts::DiscuzX < ImportScripts::Base
           FROM #{table_name "forum_attachment"}
           WHERE pid = #{post.custom_fields["import_id"]}"
       sql = "#{sql} AND aid NOT IN (#{inline_attachments.join(",")})" if !inline_attachments.empty?
+      if requested_attachment_ids.present?
+        sql = "#{sql} AND aid IN (#{requested_attachment_ids.join(",")})"
+      end
 
       results = mysql_query(sql)
 
@@ -1956,6 +1966,170 @@ class ImportScripts::DiscuzX < ImportScripts::Base
     puts "succeeded: #{success_count}"
     puts "   failed: #{fail_count}" if fail_count > 0
     puts ""
+  end
+
+  def requested_discuz_attachment_ids
+    raw_ids = ENV["DISCUZX_ATTACHMENT_IDS"].to_s.strip
+    return [] if raw_ids.blank?
+
+    ids = raw_ids.split(",").map(&:strip)
+    unless ids.all? { |id| id.match?(/\A[1-9]\d*\z/) } && ids.uniq.length == ids.length
+      raise "DISCUZX_ATTACHMENT_IDS must be a comma-separated list of unique positive integers"
+    end
+
+    ids.map(&:to_i)
+  end
+
+  def validate_requested_attachment_files!(requested_ids)
+    id_sql = requested_ids.join(",")
+    attachment_rows =
+      mysql_query(
+        "SELECT aid, tableid FROM #{table_name("forum_attachment")} WHERE aid IN (#{id_sql})",
+      ).to_a
+    found_ids = attachment_rows.map { |row| row["aid"].to_i }.to_set
+    missing_source_ids = requested_ids.to_set - found_ids
+    if missing_source_ids.any?
+      raise "#{missing_source_ids.length} requested Discuz attachment ID(s) are absent from the source snapshot"
+    end
+
+    partition_rows =
+      attachment_rows
+        .group_by { |row| row["tableid"].to_i }
+        .flat_map do |table_id, rows|
+          partition_ids = rows.map { |row| row["aid"].to_i }
+          mysql_query(
+            "SELECT aid, attachment, filesize FROM #{table_name("forum_attachment_#{table_id}")} " \
+              "WHERE aid IN (#{partition_ids.join(",")})",
+          ).to_a
+        end
+    valid_file_ids =
+      partition_rows
+        .filter_map do |row|
+          path = snapshot_file(File.join(ATTACHMENT_DIR, row["attachment"].to_s))
+          next unless path && File.size(path) == row["filesize"].to_i
+
+          row["aid"].to_i
+        end
+        .to_set
+    missing_or_mismatched_file_ids = requested_ids.to_set - valid_file_ids
+    if missing_or_mismatched_file_ids.any?
+      raise "#{missing_or_mismatched_file_ids.length} requested attachment file(s) are missing or have a size mismatch; no attachments were imported"
+    end
+  end
+
+  def validate_requested_attachment_metadata!(requested_ids)
+    id_sql = requested_ids.join(",")
+    source_rows =
+      mysql_query(
+        "SELECT aid, pid FROM #{table_name("forum_attachment")} WHERE aid IN (#{id_sql})",
+      ).to_a
+    found_ids = source_rows.map { |row| row["aid"].to_i }.to_set
+    missing_ids = requested_ids.to_set - found_ids
+    if missing_ids.any?
+      raise "#{missing_ids.length} requested Discuz attachment ID(s) are absent from the source snapshot"
+    end
+
+    sample_post_ids = @sample_manifest.fetch("post_ids").map(&:to_i).to_set
+    outside_sample = source_rows.count { |row| !sample_post_ids.include?(row["pid"].to_i) }
+    if outside_sample.positive?
+      raise "#{outside_sample} requested attachment(s) are outside the relation-closed sample post set"
+    end
+  end
+
+  def import_attachment_metadata
+    requested_ids = requested_discuz_attachment_ids.to_set
+    requested_ids = nil if requested_ids.empty?
+    sample_post_ids = @sample_manifest.fetch("post_ids").map(&:to_s).to_set
+    imported_users = UserCustomField.where(name: "import_id").pluck(:value, :user_id).to_h
+    current_count = 0
+    imported_count = 0
+    total_count =
+      mysql_query(
+        "SELECT count(*) count FROM #{table_name("forum_post")} WHERE pid IN (#{sample_id_sql("post_ids")});",
+      ).first[
+        "count"
+      ].to_i
+
+    puts "", "Importing Discuz attachment metadata...", ""
+
+    Post.unscoped.find_each do |post|
+      source_post_id = post.custom_fields["import_id"].to_s
+      next unless source_post_id.match?(/\A[1-9]\d*\z/) && sample_post_ids.include?(source_post_id)
+
+      current_count += 1
+      if current_count % 100 == 0 || current_count == total_count
+        print_status current_count, total_count
+      end
+
+      sql =
+        "SELECT aid, tableid FROM #{table_name("forum_attachment")} " \
+          "WHERE pid = #{source_post_id}"
+      sql = "#{sql} AND aid IN (#{requested_ids.to_a.sort.join(",")})" if requested_ids
+      index_rows = mysql_query(sql).to_a
+      next if index_rows.empty?
+
+      source_rows =
+        index_rows
+          .group_by { |row| row["tableid"].to_i }
+          .flat_map do |table_id, rows|
+            aid_sql = rows.map { |row| row["aid"].to_i }.join(",")
+            mysql_query(
+              "SELECT aid, pid, tid, uid, dateline, filename, attachment, filesize, remote, " \
+                "isimage, thumb, readperm, price " \
+                "FROM #{table_name("forum_attachment_#{table_id}")} WHERE aid IN (#{aid_sql})",
+            ).to_a
+          end
+      if source_rows.length != index_rows.length
+        raise "source attachment metadata is incomplete for Discuz post #{source_post_id}"
+      end
+
+      topic_prices =
+        mysql_query(
+          "SELECT tid, price FROM #{table_name("forum_thread")} " \
+            "WHERE tid IN (#{source_rows.map { |row| row["tid"].to_i }.uniq.join(",")})",
+        ).to_a.to_h { |row| [row["tid"].to_i, row["price"].to_i] }
+
+      source_rows.each do |row|
+        unless row["pid"].to_i == source_post_id.to_i
+          raise "Discuz attachment #{row["aid"]} points to a different source post"
+        end
+
+        relative_path = row["attachment"].to_s
+        path_parts = relative_path.split("/", -1)
+        if relative_path.blank? || relative_path.start_with?("/") || relative_path.include?("\\") ||
+             path_parts.any? { |part| part.blank? || part == "." || part == ".." }
+          raise "Discuz attachment #{row["aid"]} has an invalid object path"
+        end
+
+        filename = row["filename"].to_s.presence || File.basename(relative_path)
+        attachment = DiscourseDiscuzBbcode::Attachment.find_or_initialize_by(aid: row["aid"].to_i)
+        if attachment.persisted? && attachment.discuz_pid.to_i != source_post_id.to_i
+          raise "Discuz attachment #{row["aid"]} is already mapped to another source post"
+        end
+
+        attachment.assign_attributes(
+          discuz_pid: row["pid"].to_i,
+          discuz_tid: row["tid"].to_i,
+          discuz_uid: row["uid"].to_i,
+          post_id: post.id,
+          user_id: imported_users[row["uid"].to_s],
+          object_key: "forum/#{relative_path}",
+          filename: filename,
+          filesize: row["filesize"].to_i,
+          is_image: row["isimage"].to_i == 1,
+          has_thumbnail: row["thumb"].to_i == 1,
+          is_remote: row["remote"].to_i == 1,
+          readperm: row["readperm"].to_i,
+          attachment_price: row["price"].to_i,
+          topic_price: topic_prices.fetch(row["tid"].to_i, 0),
+          uploaded_at: row["dateline"].to_i,
+        )
+        attachment.save!
+        imported_count += 1
+      end
+    end
+
+    puts "", "", "metadata rows imported or refreshed: #{imported_count}", ""
   end
 
   # Create the full path to the discuz avatar specified from user id

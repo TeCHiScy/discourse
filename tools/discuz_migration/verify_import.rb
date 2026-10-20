@@ -51,6 +51,8 @@ class DiscuzImportVerifier
     sample_stage =
       if ARGV.include?("--sample-identities")
         :identities
+      elsif ARGV.include?("--sample-attachments")
+        :attachments
       elsif ARGV.include?("--sample-acceptance")
         :acceptance
       end
@@ -61,6 +63,8 @@ class DiscuzImportVerifier
       report =
         if ARGV.include?("--source-preflight")
           source_preflight
+        elsif sample_stage == :attachments
+          verify_sample_attachments
         elsif sample_stage
           verify_sample(sample_stage)
         else
@@ -118,6 +122,18 @@ class DiscuzImportVerifier
     ids.empty? ? "0" : ids.join(",")
   end
 
+  def requested_attachment_ids
+    raw_ids = ENV["DISCUZX_ATTACHMENT_IDS"].to_s.strip
+    return [] if raw_ids.blank?
+
+    ids = raw_ids.split(",").map(&:strip)
+    unless ids.all? { |id| id.match?(/\A[1-9]\d*\z/) } && ids.uniq.length == ids.length
+      raise "DISCUZX_ATTACHMENT_IDS must be a comma-separated list of unique positive integers"
+    end
+
+    ids.map(&:to_i)
+  end
+
   def verify_local_target!(connection)
     host = ENV.fetch("PGHOST", "localhost")
     port = Integer(ENV.fetch("PGPORT", "5432"))
@@ -152,7 +168,8 @@ class DiscuzImportVerifier
           "Source-restricted categories use a staff-only fallback; exact Discuz group, formula, password, and per-user rules remain pending",
         text_content:
           "Stable IDs and relations are checked; normalized text and rendered content need a separate review",
-        attachments: "Deferred until a local read-only file snapshot is available",
+        attachments:
+          "COS objects can remain in place; metadata-only imports are checked against the relation-closed sample, while object availability and signed delivery need separate checks",
         custom_features: "Virtual-airline and paid-post adapters remain pending",
       },
     }
@@ -285,6 +302,172 @@ class DiscuzImportVerifier
           ),
         failure_count: core_failures.sum,
         pending_content_stage: stage == :identities,
+      },
+    }
+  end
+
+  def verify_sample_attachments
+    raise "attachment verification requires DISCUZX_SAMPLE_MANIFEST" unless @sample_manifest
+
+    source_post_ids = @sample_manifest.fetch("post_ids").map(&:to_i)
+    post_filter = source_post_ids.empty? ? "0" : source_post_ids.join(",")
+    requested_ids = requested_attachment_ids
+    attachment_filter = " AND aid IN (#{requested_ids.join(",")})" if requested_ids.present?
+    index_rows =
+      rows(
+        "SELECT aid, pid, tableid FROM #{bbs("forum_attachment")} " \
+          "WHERE pid IN (#{post_filter})#{attachment_filter} ORDER BY aid",
+      )
+    source_details =
+      index_rows
+        .group_by { |row| row["tableid"].to_i }
+        .flat_map do |table_id, entries|
+          aid_filter = entries.map { |row| row["aid"].to_i }.join(",")
+          rows(
+            "SELECT aid, pid, tid, uid, dateline, filename, attachment, filesize, remote, " \
+              "isimage, thumb, readperm, price FROM #{bbs("forum_attachment_#{table_id}")} " \
+              "WHERE aid IN (#{aid_filter})",
+          )
+        end
+    remote_source_count = source_details.count { |row| row["remote"].to_i == 1 }
+    details_by_aid = source_details.index_by { |row| row["aid"].to_i }
+    topic_ids = source_details.map { |row| row["tid"].to_i }.uniq
+    topic_filter = topic_ids.empty? ? "0" : topic_ids.join(",")
+    topic_prices =
+      rows(
+        "SELECT tid, price FROM #{bbs("forum_thread")} WHERE tid IN (#{topic_filter})",
+      ).to_h { |row| [row["tid"].to_i, row["price"].to_i] }
+
+    source_ids = index_rows.map { |row| row["aid"].to_i }.to_set
+    source_duplicate_aid_count = index_rows.length - source_ids.length
+    target_records =
+      ::DiscourseDiscuzBbcode::Attachment
+        .where(discuz_pid: source_post_ids)
+        .then { |scope| requested_ids.present? ? scope.where(aid: requested_ids) : scope }
+        .index_by { |record| record.aid.to_i }
+    target_ids = target_records.keys.to_set
+    post_imports, = imported_values(PostCustomField, :post_id)
+    missing_count = (source_ids - target_ids).length
+    missing_aids = source_ids - target_ids
+    missing_source_pids =
+      index_rows
+        .filter_map { |row| row["pid"].to_i if missing_aids.include?(row["aid"].to_i) }
+        .to_set
+    unmapped_missing_source_pid_count =
+      (missing_source_pids - post_imports.keys.map(&:to_i).to_set).length
+    unexpected_count = (target_ids - source_ids).length
+    missing_source_detail_count = source_ids.count { |aid| !details_by_aid.key?(aid) }
+    metadata_mismatch_count = 0
+    post_relation_mismatch_count = 0
+
+    source_ids.each do |aid|
+      source = details_by_aid[aid]
+      target = target_records[aid]
+      next unless source && target
+
+      relative_path = source["attachment"].to_s
+      expected_filename = source["filename"].to_s.presence || File.basename(relative_path)
+      expected_post_id = post_imports[source["pid"].to_s]
+      post_relation_mismatch_count += 1 if target.post_id.to_i != expected_post_id.to_i
+      expected_values = {
+        discuz_pid: source["pid"].to_i,
+        discuz_tid: source["tid"].to_i,
+        discuz_uid: source["uid"].to_i,
+        object_key: "forum/#{relative_path}",
+        filename: expected_filename,
+        filesize: source["filesize"].to_i,
+        is_image: source["isimage"].to_i == 1,
+        has_thumbnail: source["thumb"].to_i == 1,
+        is_remote: source["remote"].to_i == 1,
+        readperm: source["readperm"].to_i,
+        attachment_price: source["price"].to_i,
+        topic_price: topic_prices.fetch(source["tid"].to_i, 0),
+        uploaded_at: source["dateline"].to_i,
+      }
+      metadata_mismatch_count +=
+        expected_values.count { |attribute, expected| target.public_send(attribute) != expected }
+    end
+
+    source_posts =
+      rows("SELECT pid, message FROM #{bbs("forum_post")} WHERE pid IN (#{post_filter})")
+    referenced_pairs =
+      source_posts
+        .flat_map do |post|
+          post["message"]
+            .to_s
+            .scan(%r{\[attach\](\d+)\[/attach\]}i)
+            .flatten
+            .map { |aid| [post["pid"].to_i, aid.to_i] }
+        end
+        .select { |_source_pid, aid| requested_ids.blank? || requested_ids.include?(aid) }
+    referenced_ids = referenced_pairs.map(&:last).uniq
+    referenced_source_rows =
+      if referenced_ids.empty?
+        []
+      else
+        rows(
+          "SELECT aid, pid FROM #{bbs("forum_attachment")} " \
+            "WHERE aid IN (#{referenced_ids.join(",")})",
+        )
+      end
+    referenced_source_by_aid = referenced_source_rows.index_by { |row| row["aid"].to_i }
+    referenced_attachment_mismatch_count =
+      referenced_pairs.count do |source_pid, aid|
+        referenced_source_by_aid[aid].nil? ||
+          referenced_source_by_aid[aid]["pid"].to_i != source_pid
+      end
+    referenced_attachment_absent_from_source_count =
+      referenced_pairs.count { |_source_pid, aid| !referenced_source_by_aid.key?(aid) }
+    referenced_attachment_wrong_post_count =
+      referenced_attachment_mismatch_count - referenced_attachment_absent_from_source_count
+
+    requested_ids_missing_from_sample_count = (requested_ids.to_set - source_ids).length
+    failure_count =
+      missing_count + unexpected_count + missing_source_detail_count + metadata_mismatch_count +
+        post_relation_mismatch_count + unmapped_missing_source_pid_count +
+        requested_ids_missing_from_sample_count
+    source_reference_issue_count = referenced_attachment_mismatch_count
+
+    {
+      mode: "sample_attachment_metadata",
+      source_attachment_count: source_ids.length,
+      source_attachment_index_row_count: index_rows.length,
+      source_remote_object_count: remote_source_count,
+      source_local_flag_count: source_details.length - remote_source_count,
+      duplicate_source_aid_count: source_duplicate_aid_count,
+      source_posts_with_attachments: index_rows.map { |row| row["pid"].to_i }.uniq.length,
+      posts_with_missing_target_attachment: missing_source_pids.length,
+      missing_target_attachments_by_partition:
+        index_rows
+          .select { |row| missing_aids.include?(row["aid"].to_i) }
+          .group_by { |row| row["tableid"].to_i }
+          .transform_values(&:length),
+      target_attachment_count: target_ids.length,
+      inline_reference_count: referenced_pairs.length,
+      missing_count: missing_count,
+      missing_attachments_with_unmapped_post_count: unmapped_missing_source_pid_count,
+      missing_attachments_with_mapped_post_count: missing_count - unmapped_missing_source_pid_count,
+      unexpected_count: unexpected_count,
+      missing_source_detail_count: missing_source_detail_count,
+      metadata_mismatch_count: metadata_mismatch_count,
+      post_relation_mismatch_count: post_relation_mismatch_count,
+      referenced_attachment_mismatch_count: referenced_attachment_mismatch_count,
+      referenced_attachment_absent_from_source_count:
+        referenced_attachment_absent_from_source_count,
+      referenced_attachment_wrong_post_count: referenced_attachment_wrong_post_count,
+      requested_ids_missing_from_sample_count: requested_ids_missing_from_sample_count,
+      binary_objects_read_or_copied: false,
+      acceptance: {
+        status:
+          if failure_count.positive?
+            "failed"
+          elsif source_reference_issue_count.positive?
+            "passed_with_source_reference_issues"
+          else
+            "passed"
+          end,
+        failure_count: failure_count,
+        source_reference_issue_count: source_reference_issue_count,
       },
     }
   end

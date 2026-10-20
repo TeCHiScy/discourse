@@ -276,37 +276,62 @@ export function setup(helper) {
     "td",
     "td[colspan]",
     "td[rowspan]",
+    "span.discuz-attachment[data-aid]",
   ]);
 
   helper.registerOptions((opts, siteSettings) => {
     opts.features.discuz_bbcode_tables =
       siteSettings.discourse_discuz_bbcode_tables_enabled;
+    opts.features.discuz_bbcode_attachments =
+      siteSettings.discourse_discuz_bbcode_attachments_enabled;
   });
 
   helper.registerPlugin((md) => {
-    if (!md.options.discourse.features.discuz_bbcode_tables) {
-      return;
+    if (md.options.discourse.features.discuz_bbcode_tables) {
+      md.block.bbcode.ruler.push("discuz-table", {
+        tag: "table",
+
+        replace(state, _tagInfo, content) {
+          const explicit = parseExplicitTable(content);
+          const rows = explicit.found
+            ? explicit.rows
+            : parseLegacyTable(content);
+
+          if (!rows) {
+            return false;
+          }
+
+          const token = state.push("discuz_bbcode_table", "", 0);
+          token.block = true;
+          token.content = renderRows(rows, md, state.env);
+          return true;
+        },
+      });
+
+      md.renderer.rules.discuz_bbcode_table = (tokens, index) =>
+        tokens[index].content;
     }
 
-    md.block.bbcode.ruler.push("discuz-table", {
-      tag: "table",
+    if (md.options.discourse.features.discuz_bbcode_attachments) {
+      md.inline.bbcode.ruler.push("discuz-attachment", {
+        tag: "attach",
 
-      replace(state, _tagInfo, content) {
-        const explicit = parseExplicitTable(content);
-        const rows = explicit.found ? explicit.rows : parseLegacyTable(content);
+        replace(state, _tagInfo, content) {
+          const aid = content.trim();
+          if (!/^[1-9]\d*$/.test(aid)) {
+            return false;
+          }
 
-        if (!rows) {
-          return false;
-        }
+          const token = state.push("discuz_bbcode_attachment", "", 0);
+          token.content = aid;
+          return true;
+        },
+      });
 
-        const token = state.push("discuz_bbcode_table", "", 0);
-        token.block = true;
-        token.content = renderRows(rows, md, state.env);
-        return true;
-      },
-    });
-
-    md.renderer.rules.discuz_bbcode_table = (tokens, index) =>
-      tokens[index].content;
+      md.renderer.rules.discuz_bbcode_attachment = (tokens, index) => {
+        const aid = tokens[index].content;
+        return `<span class="discuz-attachment" data-aid="${aid}">[Discuz 附件 ${aid}]</span>`;
+      };
+    }
   });
 }

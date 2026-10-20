@@ -1,3 +1,4 @@
 en:
   site_settings:
     discourse_discuz_bbcode_tables_enabled: "Render Discuz table BBCode in posts"
+    discourse_discuz_bbcode_attachments_enabled: "Render Discuz attachment BBCode in posts"

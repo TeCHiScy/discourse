@@ -2,3 +2,6 @@ plugins:
   discourse_discuz_bbcode_tables_enabled:
     default: true
     client: true
+  discourse_discuz_bbcode_attachments_enabled:
+    default: true
+    client: true
