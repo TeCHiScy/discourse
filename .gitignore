@@ -29,6 +29,10 @@
 
 # Plugins except for the bundled ones
 /plugins/*
+!/plugins/discourse-discuz-bbcode
+!/plugins/discourse-discuz-legacy-auth
+!/plugins/discourse-discuz-medals
+!/plugins/discourse-sinofsx-aviation
 !/plugins/discourse-details
 !/plugins/discourse-local-dates
 !/plugins/discourse-narrative-bot

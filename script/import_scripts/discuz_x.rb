@@ -9,61 +9,518 @@
 # This script is tested only on Simplified Chinese Discuz! X instances
 # If you want to import data other than Simplified Chinese, email me.
 
+require "json"
 require "php_serialize"
-require "miro"
 require "mysql2"
 require_relative "base"
+require_relative "../../tools/discuz_migration/category_permissions"
 
 class ImportScripts::DiscuzX < ImportScripts::Base
-  DISCUZX_DB = "ultrax"
-  DB_TABLE_PREFIX = "pre_"
+  DISCUZX_DB = ENV.fetch("DISCUZX_DB", "bbs")
+  UCENTER_DB = ENV.fetch("UCENTER_DB", "ucenter")
+  DB_TABLE_PREFIX = ENV.fetch("DISCUZX_TABLE_PREFIX", "")
+  DB_HOST = ENV.fetch("DISCUZX_DB_HOST", "127.0.0.1")
+  DB_PORT = Integer(ENV.fetch("DISCUZX_DB_PORT", "13306"))
   BATCH_SIZE = 1000
-  ORIGINAL_SITE_PREFIX = "oldsite.example.com/forums" # without http(s)://
-  NEW_SITE_PREFIX = "http://discourse.example.com" # with http:// or https://
-
-  # Set DISCUZX_BASE_DIR to the base directory of your discuz installation.
-  DISCUZX_BASE_DIR = "/var/www/discuz/upload"
-  AVATAR_DIR = "/uc_server/data/avatar"
-  ATTACHMENT_DIR = "/data/attachment/forum"
+  DISCUZ_SOURCE = "discuz_x3.5"
+  ORIGINAL_SITE_PREFIX = ENV.fetch("DISCUZX_ORIGINAL_SITE_PREFIX", "bbs.sinofsx.org")
+  NEW_SITE_PREFIX = ENV.fetch("DISCUZX_NEW_SITE_PREFIX", "http://127.0.0.1:3000")
+  DISCUZX_BASE_DIR = ENV.fetch("DISCUZX_BASE_DIR", "/Users/daren/discourse-lab/discuz-files")
+  AVATAR_DIR = ENV.fetch("DISCUZX_AVATAR_DIR", "uc_server/data/avatar")
+  ATTACHMENT_DIR = ENV.fetch("DISCUZX_ATTACHMENT_DIR", "data/attachment/forum")
   AUTHORIZED_EXTENSIONS = %w[jpg jpeg png gif zip rar pdf]
+  ALLOWED_TARGET_DATABASES = %w[
+    discourse_development
+    discourse_migration_sample
+    discourse_migration_sample_uid18_20261013
+  ].freeze
 
   def initialize
     super
+    @sample_manifest = load_sample_manifest
+
+    unless DB_HOST == "127.0.0.1" && DB_PORT == 13_306 && DISCUZX_DB == "bbs" &&
+             UCENTER_DB == "ucenter" && DB_TABLE_PREFIX.empty?
+      raise "Discuz source must be the local bbs/ucenter snapshot on 127.0.0.1:13306"
+    end
+    target_database = ENV.fetch("DISCOURSE_DEV_DB", "discourse_development")
+    sample_target_matches =
+      (
+        if @sample_manifest
+          target_database == @sample_manifest.fetch("target_database", "discourse_migration_sample")
+        else
+          target_database == "discourse_development"
+        end
+      )
+    unless ENV["PGHOST"] == "127.0.0.1" && Integer(ENV.fetch("PGPORT", "0")) == 15_432 &&
+             ALLOWED_TARGET_DATABASES.include?(target_database) && sample_target_matches &&
+             ActiveRecord::Base.connection.select_value("SELECT current_database()") ==
+               target_database
+      raise "Discourse target must be an approved local migration database on 127.0.0.1:15432"
+    end
 
     @client =
       Mysql2::Client.new(
-        host: "localhost",
-        username: "root",
-        #password: "password",
+        host: DB_HOST,
+        port: DB_PORT,
+        username: ENV.fetch("DISCUZX_DB_USER"),
+        password: ENV.fetch("MYSQL_PWD"),
         database: DISCUZX_DB,
+        encoding: "utf8mb4",
+        connect_timeout: 5,
+        read_timeout: 120,
+        write_timeout: 120,
+        get_server_public_key: true,
       )
+    @client.query("SET SESSION TRANSACTION READ ONLY")
     @first_post_id_by_topic_id = {}
+    @deferred_visibility_actions = []
+    @source_skip_counts = Hash.new(0)
+    @category_access_summary = Hash.new(0)
+    @seen_pm_thread_ids = Set.new
+    @unimportable_pm_thread_ids = Set.new
 
     @internal_url_regexps = [
-      %r{http(?:s)?://#{ORIGINAL_SITE_PREFIX.gsub(".", '\.')}/forum\.php\?mod=viewthread(?:&|&amp;)tid=(?<tid>\d+)(?:[^\[\]\s]*)(?:pid=?(?<pid>\d+))?(?:[^\[\]\s]*)},
-      %r{http(?:s)?://#{ORIGINAL_SITE_PREFIX.gsub(".", '\.')}/viewthread\.php\?tid=(?<tid>\d+)(?:[^\[\]\s]*)(?:pid=?(?<pid>\d+))?(?:[^\[\]\s]*)},
-      %r{http(?:s)?://#{ORIGINAL_SITE_PREFIX.gsub(".", '\.')}/forum\.php\?mod=redirect(?:&|&amp;)goto=findpost(?:&|&amp;)pid=(?<pid>\d+)(?:&|&amp;)ptid=(?<tid>\d+)(?:[^\[\]\s]*)},
-      %r{http(?:s)?://#{ORIGINAL_SITE_PREFIX.gsub(".", '\.')}/redirect\.php\?goto=findpost(?:&|&amp;)pid=(?<pid>\d+)(?:&|&amp;)ptid=(?<tid>\d+)(?:[^\[\]\s]*)},
-      %r{http(?:s)?://#{ORIGINAL_SITE_PREFIX.gsub(".", '\.')}/forumdisplay\.php\?fid=(?<fid>\d+)(?:[^\[\]\s]*)},
-      %r{http(?:s)?://#{ORIGINAL_SITE_PREFIX.gsub(".", '\.')}/forum\.php\?mod=forumdisplay(?:&|&amp;)fid=(?<fid>\d+)(?:[^\[\]\s]*)},
-      %r{http(?:s)?://#{ORIGINAL_SITE_PREFIX.gsub(".", '\.')}/(?<action>index)\.php(?:[^\[\]\s]*)},
-      %r{http(?:s)?://#{ORIGINAL_SITE_PREFIX.gsub(".", '\.')}/(?<action>stats)\.php(?:[^\[\]\s]*)},
-      %r{http(?:s)?://#{ORIGINAL_SITE_PREFIX.gsub(".", '\.')}/misc.php\?mod=(?<mod>stat|ranklist)(?:[^\[\]\s]*)},
+      %r{http(?:s)?://#{ORIGINAL_SITE_PREFIX.gsub(".", '\\.')}/forum\.php\?mod=viewthread(?:&|&amp;)tid=(?<tid>\d+)(?:[^\[\]\s]*)(?:pid=?(?<pid>\d+))?(?:[^\[\]\s]*)},
+      %r{http(?:s)?://#{ORIGINAL_SITE_PREFIX.gsub(".", '\\.')}/viewthread\.php\?tid=(?<tid>\d+)(?:[^\[\]\s]*)(?:pid=?(?<pid>\d+))?(?:[^\[\]\s]*)},
+      %r{http(?:s)?://#{ORIGINAL_SITE_PREFIX.gsub(".", '\\.')}/forum\.php\?mod=redirect(?:&|&amp;)goto=findpost(?:&|&amp;)pid=(?<pid>\d+)(?:&|&amp;)ptid=(?<tid>\d+)(?:[^\[\]\s]*)},
+      %r{http(?:s)?://#{ORIGINAL_SITE_PREFIX.gsub(".", '\\.')}/redirect\.php\?goto=findpost(?:&|&amp;)pid=(?<pid>\d+)(?:&|&amp;)ptid=(?<tid>\d+)(?:[^\[\]\s]*)},
+      %r{http(?:s)?://#{ORIGINAL_SITE_PREFIX.gsub(".", '\\.')}/forumdisplay\.php\?fid=(?<fid>\d+)(?:[^\[\]\s]*)},
+      %r{http(?:s)?://#{ORIGINAL_SITE_PREFIX.gsub(".", '\\.')}/forum\.php\?mod=forumdisplay(?:&|&amp;)fid=(?<fid>\d+)(?:[^\[\]\s]*)},
+      %r{http(?:s)?://#{ORIGINAL_SITE_PREFIX.gsub(".", '\\.')}/(?<action>index)\.php(?:[^\[\]\s]*)},
+      %r{http(?:s)?://#{ORIGINAL_SITE_PREFIX.gsub(".", '\\.')}/(?<action>stats)\.php(?:[^\[\]\s]*)},
+      %r{http(?:s)?://#{ORIGINAL_SITE_PREFIX.gsub(".", '\\.')}/misc\.php\?mod=(?<mod>stat|ranklist)(?:[^\[\]\s]*)},
     ]
   end
 
   def execute
-    get_knowledge_about_duplicated_email
+    validate_attachment_snapshot! if ENV["DISCUZX_IMPORT_ATTACHMENTS"] == "1"
+    validate_sample_source! if @sample_manifest
+    stage = ENV.fetch("DISCUZX_IMPORT_STAGE", "all")
+    if %w[all identity content categories attachments attachment_metadata medals].exclude?(stage)
+      raise "DISCUZX_IMPORT_STAGE must be all, identity, content, categories, attachments, attachment_metadata, or medals"
+    end
+    raise "sample stages require a sample manifest" if stage != "all" && !@sample_manifest
+    if stage == "attachments" && !attachments_enabled?
+      raise "attachment stage requires DISCUZX_IMPORT_ATTACHMENTS=1"
+    end
+    if ENV["DISCUZX_ATTACHMENT_IDS"].present? && %w[attachments attachment_metadata].exclude?(stage)
+      raise "DISCUZX_ATTACHMENT_IDS can only be used with an attachment import stage"
+    end
+    requested_attachment_ids = requested_discuz_attachment_ids if %w[
+      attachments
+      attachment_metadata
+    ].include?(stage)
+    if stage == "attachments" && requested_attachment_ids.present?
+      validate_requested_attachment_files!(requested_attachment_ids)
+    end
+    if stage == "attachment_metadata" && requested_attachment_ids.present?
+      validate_requested_attachment_metadata!(requested_attachment_ids)
+    end
+
+    configure_site_for_discuz_import!
+
+    if stage == "attachments"
+      import_attachments
+      puts "Sample attachment stage complete; users, categories, topics, and messages were untouched"
+      report_source_skips
+      return
+    end
+
+    if stage == "attachment_metadata"
+      import_attachment_metadata
+      puts "Sample attachment metadata stage complete; source objects were not read or copied"
+      report_source_skips
+      return
+    end
+
+    if stage == "medals"
+      validate_existing_discuz_user_mappings!
+      import_discuz_medals
+      puts "Sample medal stage complete; other imported records were untouched"
+      report_source_skips
+      return
+    end
+
+    if stage == "categories"
+      @skip_updates = true
+      import_categories
+      prepare_site_for_discuz_import!
+      puts "Sample category stage complete; user identities, posts, and messages were untouched"
+      report_source_skips
+      return
+    end
+
+    validate_existing_discuz_user_mappings!
+    get_duplicate_email_uids
     import_users
+    import_unrepresented_users
     import_categories
+    if stage == "identity"
+      prepare_site_for_discuz_import!
+      puts "Sample identity stage complete; posts, messages, avatars, and attachments were not imported"
+      report_source_skips
+      return
+    end
     import_posts
     import_private_messages
-    import_attachments
+    if ENV["DISCUZX_IMPORT_ATTACHMENTS"] == "1"
+      import_attachments
+    else
+      attachment_filter = " WHERE pid IN (#{sample_id_sql("post_ids")})" if @sample_manifest
+      @source_skip_counts["attachments_deferred_until_snapshot"] = mysql_query(
+        "SELECT count(*) count FROM #{table_name("forum_attachment")}#{attachment_filter};",
+      ).first[
+        "count"
+      ].to_i
+      avatar_filter = " AND uid IN (#{sample_id_sql("member_uids")})" if @sample_manifest
+      @source_skip_counts["avatars_deferred_until_snapshot"] = mysql_query(
+        "SELECT count(*) count FROM (#{source_member_union}) members WHERE avatarstatus = 1#{avatar_filter}",
+      ).first[
+        "count"
+      ].to_i
+      puts "Attachment import deferred until a local read-only attachment snapshot is available"
+    end
+    report_source_skips
   end
 
-  # add the prefix to the table name
+  def validate_existing_discuz_user_mappings!
+    import_fields = UserCustomField.where(name: "import_id").pluck(:user_id, :value)
+    numeric_import_fields =
+      import_fields.select { |_user_id, value| value.to_s.match?(/\A[1-9]\d*\z/) }
+    return if numeric_import_fields.empty?
+
+    source_by_user = UserCustomField.where(name: "discuz_source").pluck(:user_id, :value).to_h
+    uid_by_user = UserCustomField.where(name: "discuz_uid").pluck(:user_id, :value).to_h
+    import_id_by_user = numeric_import_fields.to_h
+    invalid_user_ids =
+      numeric_import_fields.filter_map do |user_id, import_id|
+        if source_by_user[user_id] != DISCUZ_SOURCE || uid_by_user[user_id].to_s != import_id.to_s
+          user_id
+        end
+      end
+    invalid_user_ids.concat(
+      source_by_user.filter_map do |user_id, source|
+        next unless source == DISCUZ_SOURCE
+        next if import_id_by_user[user_id].to_s == uid_by_user[user_id].to_s
+
+        user_id
+      end,
+    )
+    invalid_user_ids.uniq!
+
+    if invalid_user_ids.any?
+      raise "target contains #{invalid_user_ids.length} imported user mapping(s) without matching Discuz source markers; use a clean migration database before importing"
+    end
+  end
+
+  def prepare_site_for_discuz_import!
+    require "seed_data/topics"
+    seed_topic_settings = %w[guidelines_topic_id welcome_topic_id admin_quick_start_topic_id]
+    original_topic_ids = seed_topic_settings.to_h { |name| [name, SiteSetting.get(name).to_i] }
+    safe_seed_topics =
+      original_topic_ids.filter_map do |setting_name, topic_id|
+        next unless topic_id.positive?
+
+        topic = Topic.find_by(id: topic_id)
+        next unless topic && topic.deleted_at.blank?
+
+        posts = Post.with_deleted.where(topic_id: topic_id)
+        next if posts.empty?
+        next if posts.where.not(user_id: Discourse::SYSTEM_USER_ID).exists?
+        next if posts.where.not(last_editor_id: Discourse::SYSTEM_USER_ID).exists?
+
+        setting_name
+      end
+    SeedData::Topics.with_default_locale.delete(
+      site_setting_names: safe_seed_topics,
+      skip_changed: true,
+    )
+
+    removed = []
+    safe_seed_topics.each do |setting_name|
+      topic_id = original_topic_ids.fetch(setting_name)
+
+      topic = Topic.find_by(id: topic_id)
+      next if topic && topic.deleted_at.blank?
+
+      SiteSetting.set(setting_name, -1)
+      removed << setting_name
+    end
+
+    puts "Removed #{removed.length} untouched default Discourse topic(s); edited seed topics were preserved"
+    remove_untouched_general_category!
+    configure_default_sidebar_categories!
+  end
+
+  def configure_default_sidebar_categories!
+    if @category_rows_by_id.blank?
+      raise "Discuz categories must be imported before configuring the sidebar"
+    end
+
+    source_category_ids =
+      @category_rows_by_id.values.filter_map do |row|
+        next if row["type"] == "group" || row["status"].to_i == 2
+
+        row["id"].to_i
+      end
+    target_category_ids =
+      source_category_ids
+        .filter_map { |source_id| category_id_from_imported_category_id(source_id) }
+        .uniq
+
+    if target_category_ids.length != source_category_ids.uniq.length
+      raise "not all importable Discuz categories have mappings; refusing to configure an incomplete sidebar"
+    end
+
+    target_category_ids = Category.where(id: target_category_ids).order(:position, :id).pluck(:id)
+    if target_category_ids.length != source_category_ids.uniq.length
+      raise "one or more imported Discuz categories are missing from the Discourse database"
+    end
+
+    desired_categories = target_category_ids.join("|")
+    SiteSetting.default_navigation_menu_categories =
+      desired_categories unless SiteSetting.default_navigation_menu_categories == desired_categories
+
+    unless SiteSetting.default_navigation_menu_categories == desired_categories
+      raise "failed to configure the default sidebar categories for Discuz import"
+    end
+
+    puts "Configured #{target_category_ids.length} imported Discuz categories as default sidebar links"
+  end
+
+  def configure_site_for_discuz_import!
+    SiteSetting.default_locale = "zh_CN"
+    SiteSetting.unicode_usernames = true
+
+    unless SiteSetting.default_locale == "zh_CN" && SiteSetting.unicode_usernames
+      raise "Discuz import requires the global zh_CN locale and Unicode usernames setting"
+    end
+
+    puts "Enabled required global settings before import: default_locale=zh_CN, unicode_usernames=true"
+  end
+
+  def remove_untouched_general_category!
+    category_id = SiteSetting.general_category_id.to_i
+    return false unless category_id.positive?
+
+    category = Category.find_by(id: category_id)
+    return false unless category
+    return false if CategoryCustomField.exists?(category_id: category.id, name: "import_id")
+
+    reasons = []
+    reasons << "slug is not general" unless category.slug == "general"
+    reasons << "has child categories" if category.has_children?
+    reasons << "has active topics" if category.topic_count.positive?
+
+    require "seed_data/categories"
+    seed_categories = SeedData::Categories.with_default_locale
+    reasons << "category definition was edited" unless seed_categories.send(:unchanged?, category)
+
+    non_seed_topic_ids =
+      Topic
+        .with_deleted
+        .where(category_id: category.id)
+        .where.not(id: category.topic_id)
+        .reject do |topic|
+          next false unless topic.deleted_at.present? && topic.user_id == Discourse::SYSTEM_USER_ID
+
+          posts = Post.with_deleted.where(topic_id: topic.id)
+          posts.exists? && !posts.where.not(user_id: Discourse::SYSTEM_USER_ID).exists? &&
+            !posts.where.not(last_editor_id: Discourse::SYSTEM_USER_ID).exists? &&
+            !PostCustomField.exists?(post_id: posts.select(:id), name: "import_id") &&
+            !TopicCustomField.exists?(topic_id: topic.id, name: "import_id")
+        end
+        .map(&:id)
+    reasons << "has non-seed topics #{non_seed_topic_ids.join(",")}" if non_seed_topic_ids.any?
+
+    if reasons.any?
+      puts "Preserved default category #{category.id} (#{category.name}): #{reasons.join("; ")}"
+      return false
+    end
+
+    ActiveRecord::Base.transaction do
+      category.destroy!
+      menu_category_ids = SiteSetting.default_navigation_menu_categories.split("|")
+      if menu_category_ids.include?(category_id.to_s)
+        SiteSetting.default_navigation_menu_categories =
+          (menu_category_ids - [category_id.to_s]).join("|")
+      end
+    end
+    puts "Removed untouched default General category #{category_id}"
+    true
+  end
+
+  def source_email_comparison_sql(expression)
+    return "LOWER(TRIM(#{expression}))" unless SiteSetting.normalize_emails?
+
+    <<~SQL.squish
+      LOWER(CONCAT(
+        REPLACE(SUBSTRING_INDEX(SUBSTRING_INDEX(TRIM(#{expression}), '@', 1), '+', 1), '.', ''),
+        '@',
+        SUBSTRING_INDEX(TRIM(#{expression}), '@', -1)
+      ))
+    SQL
+  end
+
+  def reserved_discuz_email(uid)
+    suffix = 0
+    loop do
+      local_part = "discuz-uid-#{uid}"
+      local_part = "#{local_part}-#{suffix}" if suffix.positive?
+      email = "#{local_part}@users.invalid"
+      return email if UserEmail.find_by_normalized(email).nil?
+
+      suffix += 1
+    end
+  end
+
+  def validate_attachment_snapshot!
+    expanded_root = File.expand_path(DISCUZX_BASE_DIR)
+    lab_root = File.expand_path("/Users/daren/discourse-lab")
+    real_root = File.realpath(expanded_root)
+    unless real_root.start_with?("#{lab_root}/") && File.directory?(real_root)
+      raise "attachment import requires a local snapshot under #{lab_root}"
+    end
+  end
+
+  def attachments_enabled?
+    ENV["DISCUZX_IMPORT_ATTACHMENTS"] == "1"
+  end
+
+  def snapshot_file(path)
+    root = File.realpath(DISCUZX_BASE_DIR)
+    candidate = File.expand_path(path, root)
+    return unless candidate.start_with?("#{root}/") && File.file?(candidate)
+
+    resolved = File.realpath(candidate)
+    resolved if resolved.start_with?("#{root}/")
+  rescue Errno::ENOENT
+    nil
+  end
+
   def table_name(name = nil)
-    DB_TABLE_PREFIX + name
+    qualified_table_name(DISCUZX_DB, "#{DB_TABLE_PREFIX}#{name}")
+  end
+
+  def ucenter_table_name(name)
+    qualified_table_name(UCENTER_DB, name)
+  end
+
+  def qualified_table_name(database, table)
+    raise "invalid database identifier" unless database.match?(/\A[a-zA-Z0-9_]+\z/)
+    raise "invalid table identifier" unless table.match?(/\A[a-zA-Z0-9_]+\z/)
+
+    "`#{database}`.`#{table}`"
+  end
+
+  def load_sample_manifest
+    path = ENV["DISCUZX_SAMPLE_MANIFEST"]
+    return nil if path.blank?
+
+    lab_root = File.realpath("/Users/daren/discourse-lab")
+    expanded = File.expand_path(path)
+    real_path = File.realpath(expanded)
+    unless real_path.start_with?("#{lab_root}/") && File.file?(real_path)
+      raise "sample manifest must be a file under /Users/daren/discourse-lab"
+    end
+    raise "sample manifest permissions must be 0600" if (File.stat(real_path).mode & 0o077).nonzero?
+
+    manifest = JSON.parse(File.read(real_path))
+    raise "unsupported sample manifest version" unless manifest["version"] == 1
+    sample_database = manifest.fetch("target_database", "discourse_migration_sample")
+    if %w[discourse_migration_sample discourse_migration_sample_uid18_20261013].exclude?(
+         sample_database,
+       )
+      raise "sample manifest target database is not approved"
+    end
+    %w[
+      member_uids
+      pm_declared_participant_uids
+      category_ids
+      topic_ids
+      post_ids
+      pm_thread_ids
+      pm_message_ids
+      placeholder_uids
+      required_uids
+    ].each do |key|
+      ids = manifest.fetch(key)
+      unless ids.is_a?(Array) && ids.all? { |id| id.is_a?(Integer) && id.positive? } &&
+               ids.uniq.length == ids.length
+        raise "invalid sample manifest IDs for #{key}"
+      end
+    end
+    manifest
+  rescue Errno::ENOENT
+    raise "sample manifest does not exist"
+  end
+
+  def sample_ids(key)
+    @sample_manifest ? @sample_manifest.fetch(key).map(&:to_i) : []
+  end
+
+  def sample_id_sql(key)
+    ids = sample_ids(key)
+    ids.empty? ? "0" : ids.join(",")
+  end
+
+  def validate_sample_source!
+    expected = @sample_manifest.fetch("source_counts")
+    actual_members =
+      mysql_query("SELECT count(*) count FROM (#{source_member_union}) members").first["count"].to_i
+    actual_categories =
+      mysql_query(
+        "SELECT count(*) count FROM #{table_name("forum_forum")} WHERE type <> 'group' AND status <> 2",
+      ).first[
+        "count"
+      ].to_i
+    actual_threads =
+      mysql_query("SELECT count(*) count FROM #{table_name("forum_thread")}").first["count"].to_i
+    actual_posts =
+      mysql_query("SELECT count(*) count FROM #{table_name("forum_post")}").first["count"].to_i
+    unless [actual_members, actual_categories, actual_threads, actual_posts] ==
+             [
+               expected.fetch("members"),
+               expected.fetch("categories"),
+               expected.fetch("threads"),
+               expected.fetch("posts"),
+             ].map(&:to_i)
+      raise "sample manifest source counts no longer match this baseline"
+    end
+
+    expected
+      .fetch("pm_messages_by_shard")
+      .each do |table, count|
+        shard = table.delete_prefix("pm_messages_")
+        raise "invalid PM shard in sample manifest" unless shard.match?(/\A[0-9]\z/)
+        actual =
+          mysql_query(
+            "SELECT count(*) count FROM #{ucenter_table_name("pm_messages_#{shard}")}",
+          ).first[
+            "count"
+          ].to_i
+        unless actual == count.to_i
+          raise "sample manifest PM source counts no longer match this baseline"
+        end
+      end
+  end
+
+  def source_member_union
+    active = table_name("common_member")
+    archived = table_name("common_member_archive")
+
+    <<~SQL
+      SELECT uid, username, email, groupid, emailstatus, avatarstatus
+        FROM #{active}
+      UNION ALL
+      SELECT archived.uid, archived.username, archived.email,
+             archived.groupid, archived.emailstatus, archived.avatarstatus
+        FROM #{archived} archived
+       WHERE NOT EXISTS (
+         SELECT 1 FROM #{active} active WHERE active.uid = archived.uid
+       )
+    SQL
   end
 
   # find which group members can be granted as admin
@@ -111,22 +568,112 @@ class ImportScripts::DiscuzX < ImportScripts::Base
       end
   end
 
-  def get_knowledge_about_duplicated_email
-    @duplicated_email = {}
-    results =
-      mysql_query(
-        "select a.uid uid, b.uid import_id from pre_common_member a
-        join (select uid, email from pre_common_member group by email having count(email) > 1 order by uid asc) b USING(email)
-        where a.uid != b.uid",
-      )
+  def source_referenced_uid_union
+    pm_member_table = ucenter_table_name("pm_members")
+    pm_list_table = ucenter_table_name("pm_lists")
+    posts_table = table_name("forum_post")
+    message_tables = (0..9).map { |shard| ucenter_table_name("pm_messages_#{shard}") }
+    pm_authors =
+      message_tables.map { |table| "SELECT DISTINCT authorid uid FROM #{table}" }.join("\nUNION\n")
 
-    users = @lookup.instance_variable_get :@users
+    <<~SQL
+      SELECT DISTINCT authorid uid FROM #{posts_table}
+      UNION
+      SELECT DISTINCT uid FROM #{pm_member_table} WHERE uid > 0
+      UNION
+      #{pm_authors}
+      UNION
+      SELECT CAST(SUBSTRING_INDEX(min_max, '_', 1) AS UNSIGNED) uid
+        FROM #{pm_list_table}
+       WHERE pmtype = 1 AND min_max REGEXP '^[0-9]+_[0-9]+$'
+      UNION
+      SELECT CAST(SUBSTRING_INDEX(min_max, '_', -1) AS UNSIGNED) uid
+        FROM #{pm_list_table}
+       WHERE pmtype = 1 AND min_max REGEXP '^[0-9]+_[0-9]+$'
+    SQL
+  end
 
-    results.each do |row|
-      @duplicated_email[row["uid"]] = row["import_id"]
-      user_id = users[row["import_id"]]
-      users[row["uid"]] = user_id if user_id
+  def sample_referenced_uid_union
+    post_authors =
+      "SELECT DISTINCT authorid uid FROM #{table_name("forum_post")} WHERE authorid > 0 AND tid IN (#{sample_id_sql("topic_ids")})"
+    pm_authors =
+      (0..9)
+        .map do |shard|
+          "SELECT DISTINCT authorid uid FROM #{ucenter_table_name("pm_messages_#{shard}")} WHERE authorid > 0 AND plid IN (#{sample_id_sql("pm_thread_ids")})"
+        end
+        .join("\nUNION\n")
+    pm_members =
+      "SELECT DISTINCT uid FROM #{ucenter_table_name("pm_members")} WHERE uid > 0 AND plid IN (#{sample_id_sql("pm_thread_ids")})"
+    pm_list_table = ucenter_table_name("pm_lists")
+    pm_pair_participants = <<~SQL
+      SELECT CAST(SUBSTRING_INDEX(min_max, '_', 1) AS UNSIGNED) uid
+        FROM #{pm_list_table}
+       WHERE pmtype = 1 AND min_max REGEXP '^[0-9]+_[0-9]+$'
+         AND plid IN (#{sample_id_sql("pm_thread_ids")})
+      UNION
+      SELECT CAST(SUBSTRING_INDEX(min_max, '_', -1) AS UNSIGNED) uid
+        FROM #{pm_list_table}
+       WHERE pmtype = 1 AND min_max REGEXP '^[0-9]+_[0-9]+$'
+         AND plid IN (#{sample_id_sql("pm_thread_ids")})
+    SQL
+    [post_authors, pm_members, pm_authors, pm_pair_participants].join("\nUNION\n")
+  end
+
+  def import_unrepresented_users
+    puts "", "creating placeholders for referenced UIDs without BBS member rows"
+
+    references = @sample_manifest ? sample_referenced_uid_union : source_referenced_uid_union
+    members = source_member_union
+    ucenter_members = ucenter_table_name("members")
+    results = mysql_query(<<~SQL)
+          SELECT refs.uid id, uc.username, uc.email, uc.regdate,
+                 uc.password password_hash, uc.salt
+            FROM (#{references}) refs
+            LEFT JOIN (#{members}) known ON known.uid = refs.uid
+            LEFT JOIN #{ucenter_members} uc ON uc.uid = refs.uid
+           WHERE known.uid IS NULL AND refs.uid > 0
+           ORDER BY refs.uid ASC
+        SQL
+
+    return if results.size.zero?
+
+    puts "Creating #{results.size} non-login placeholder account(s) for source references"
+    create_users(results, total: results.size) do |user|
+      uid = user["id"].to_i
+      {
+        id: uid,
+        email: reserved_discuz_email(uid),
+        username: first_exists(user["username"], "discuz_unknown_#{uid}"),
+        name: first_exists(user["username"], "Unavailable Discuz account #{uid}"),
+        discuz_password_hash: user["password_hash"],
+        discuz_password_salt: user["salt"],
+        custom_fields: {
+          "discuz_missing_bbs_member" => true,
+        },
+        active: false,
+        created_at: user["regdate"] ? Time.zone.at(user["regdate"]) : nil,
+      }
     end
+  end
+
+  def get_duplicate_email_uids
+    member_union = source_member_union
+    normalized_email = source_email_comparison_sql("members.email")
+    normalized_candidate_email = source_email_comparison_sql("candidates.email")
+    duplicate_uids = mysql_query(<<~SQL)
+          SELECT members.uid
+            FROM (#{member_union}) members
+            JOIN (
+              SELECT #{normalized_candidate_email} email_key, MIN(uid) retained_uid
+                FROM (#{member_union}) candidates
+               WHERE email IS NOT NULL AND TRIM(email) <> ''
+               GROUP BY email_key
+              HAVING COUNT(*) > 1
+            ) duplicates ON #{normalized_email} = duplicates.email_key
+           WHERE members.uid <> duplicates.retained_uid
+        SQL
+
+    @duplicate_email_uids = Set.new(duplicate_uids.map { |row| row["uid"].to_i })
   end
 
   def import_users
@@ -134,58 +681,90 @@ class ImportScripts::DiscuzX < ImportScripts::Base
 
     get_knowledge_about_group
 
-    sensitive_user_table = table_name "ucenter_members"
-    user_table = table_name "common_member"
-    profile_table = table_name "common_member_profile"
-    status_table = table_name "common_member_status"
-    forum_table = table_name "common_member_field_forum"
-    home_table = table_name "common_member_field_home"
-    total_count = mysql_query("SELECT count(*) count FROM #{user_table};").first["count"]
+    sensitive_user_table = ucenter_table_name("members")
+    user_source = "(#{source_member_union})"
+    profile_table = table_name("common_member_profile")
+    profile_archive_table = table_name("common_member_profile_archive")
+    status_table = table_name("common_member_status")
+    status_archive_table = table_name("common_member_status_archive")
+    forum_table = table_name("common_member_field_forum")
+    forum_archive_table = table_name("common_member_field_forum_archive")
+    home_table = table_name("common_member_field_home")
+    home_archive_table = table_name("common_member_field_home_archive")
+    user_sample_filter = " WHERE uid IN (#{sample_id_sql("member_uids")})" if @sample_manifest
+    total_count =
+      mysql_query("SELECT count(*) count FROM #{user_source} users#{user_sample_filter};").first[
+        "count"
+      ]
 
     batches(BATCH_SIZE) do |offset|
-      results =
-        mysql_query(
-          "SELECT u.uid id, u.username username, u.email email, u.groupid group_id,
-                    su.regdate regdate, su.password password_hash, su.salt salt,
-                    s.regip regip, s.lastip last_visit_ip, s.lastvisit last_visit_time, s.lastpost last_posted_at, s.lastsendmail last_emailed_at,
-                    u.emailstatus email_confirmed, u.avatarstatus avatar_exists,
-                    p.site website, p.address address, p.bio bio, p.realname realname, p.qq qq,
-                    p.resideprovince resideprovince, p.residecity residecity, p.residedist residedist, p.residecommunity residecommunity,
-                    p.resideprovince birthprovince, p.birthcity birthcity, p.birthdist birthdist, p.birthcommunity birthcommunity,
-                    h.spacecss spacecss, h.spacenote spacenote,
-                    f.customstatus customstatus, f.sightml sightml
-               FROM #{user_table} u
-               LEFT JOIN #{sensitive_user_table} su USING(uid)
-               LEFT JOIN #{profile_table} p USING(uid)
-               LEFT JOIN #{status_table} s USING(uid)
-               LEFT JOIN #{forum_table} f USING(uid)
-               LEFT JOIN #{home_table} h USING(uid)
-              ORDER BY u.uid ASC
-              LIMIT #{BATCH_SIZE}
-             OFFSET #{offset};",
-        )
+      results = mysql_query(<<~SQL)
+            SELECT u.uid id, u.username username, u.email email, u.groupid group_id,
+                   su.regdate regdate, su.password password_hash, su.salt salt,
+                   COALESCE(s.regip, sa.regip) regip,
+                   COALESCE(s.lastip, sa.lastip) last_visit_ip,
+                   COALESCE(s.lastvisit, sa.lastvisit) last_visit_time,
+                   COALESCE(s.lastpost, sa.lastpost) last_posted_at,
+                   COALESCE(s.lastsendmail, sa.lastsendmail) last_emailed_at,
+                   u.emailstatus email_confirmed, u.avatarstatus avatar_exists,
+                   COALESCE(p.site, pa.site) website,
+                   COALESCE(p.address, pa.address) address,
+                   COALESCE(p.bio, pa.bio) bio,
+                   COALESCE(p.realname, pa.realname) realname,
+                   COALESCE(p.qq, pa.qq) qq,
+                   COALESCE(p.resideprovince, pa.resideprovince) resideprovince,
+                   COALESCE(p.residecity, pa.residecity) residecity,
+                   COALESCE(p.residedist, pa.residedist) residedist,
+                   COALESCE(p.residecommunity, pa.residecommunity) residecommunity,
+                   COALESCE(p.birthprovince, pa.birthprovince) birthprovince,
+                   COALESCE(p.birthcity, pa.birthcity) birthcity,
+                   COALESCE(p.birthdist, pa.birthdist) birthdist,
+                   COALESCE(p.birthcommunity, pa.birthcommunity) birthcommunity,
+                   COALESCE(h.spacecss, ha.spacecss) spacecss,
+                   COALESCE(h.spacenote, ha.spacenote) spacenote,
+                   COALESCE(f.customstatus, fa.customstatus) customstatus,
+                   COALESCE(f.sightml, fa.sightml) sightml
+              FROM #{user_source} u
+              LEFT JOIN #{sensitive_user_table} su USING(uid)
+              LEFT JOIN #{profile_table} p USING(uid)
+              LEFT JOIN #{profile_archive_table} pa USING(uid)
+              LEFT JOIN #{status_table} s USING(uid)
+              LEFT JOIN #{status_archive_table} sa USING(uid)
+              LEFT JOIN #{forum_table} f USING(uid)
+              LEFT JOIN #{forum_archive_table} fa USING(uid)
+              LEFT JOIN #{home_table} h USING(uid)
+              LEFT JOIN #{home_archive_table} ha USING(uid)
+             #{"WHERE u.uid IN (#{sample_id_sql("member_uids")})" if @sample_manifest}
+             ORDER BY u.uid ASC
+             LIMIT #{BATCH_SIZE}
+            OFFSET #{offset};
+          SQL
 
       break if results.size < 1
 
-      # TODO: breaks the script reported by some users
-      # next if all_records_exist? :users, users.map {|u| u["id"].to_i}
-
       create_users(results, total: total_count, offset: offset) do |user|
+        uid = user["id"].to_i
+        duplicated_email = @duplicate_email_uids.include?(uid)
+        email = duplicated_email ? "discuz-uid-#{uid}@users.invalid" : user["email"]
+        custom_fields = {}
+        custom_fields["discuz_duplicate_email"] = true if duplicated_email
+
         {
-          id: user["id"],
-          email: user["email"],
+          id: uid,
+          email: email,
           username: user["username"],
           name: first_exists(user["realname"], user["customstatus"], user["username"]),
-          import_pass: user["password_hash"],
+          discuz_password_hash: user["password_hash"],
+          discuz_password_salt: user["salt"],
+          custom_fields: custom_fields,
           active: true,
-          salt: user["salt"],
           # TODO: title: user['customstatus'], # move custom title to name since discourse can't let user custom title https://meta.discourse.org/t/let-users-custom-their-title/37626
-          created_at: user["regdate"] ? Time.zone.at(user["regdate"]) : nil,
+          created_at: discuz_timestamp(user["regdate"]),
           registration_ip_address: user["regip"],
           ip_address: user["last_visit_ip"],
-          last_seen_at: user["last_visit_time"],
-          last_emailed_at: user["last_emailed_at"],
-          last_posted_at: user["last_posted_at"],
+          last_seen_at: discuz_timestamp(user["last_visit_time"]),
+          last_emailed_at: discuz_timestamp(user["last_emailed_at"]),
+          last_posted_at: discuz_timestamp(user["last_posted_at"]),
           moderator: @moderator_group_id.include?(user["group_id"]),
           admin: @admin_group_id.include?(user["group_id"]),
           website:
@@ -229,11 +808,13 @@ class ImportScripts::DiscuzX < ImportScripts::Base
             ),
           post_create_action:
             lambda do |newmember|
-              if user["avatar_exists"] == 1 && newmember.uploaded_avatar_id.blank?
+              if user["avatar_exists"] == 1 && newmember.uploaded_avatar_id.blank? &&
+                   attachments_enabled?
                 path, filename = discuzx_avatar_fullpath(user["id"])
-                if path
+                avatar_path = snapshot_file(path)
+                if avatar_path
                   begin
-                    upload = create_upload(newmember.id, path, filename)
+                    upload = create_upload(newmember.id, avatar_path, filename)
                     if !upload.nil? && upload.persisted?
                       newmember.import_mode = false
                       newmember.create_user_avatar
@@ -246,11 +827,12 @@ class ImportScripts::DiscuzX < ImportScripts::Base
                   rescue SystemCallError => err
                     puts "Could not import avatar: #{err.message}"
                   end
+                else
+                  @source_skip_counts["avatar_file_missing_from_snapshot"] += 1
                 end
               end
-              if user["spacecss"].present? &&
+              if attachments_enabled? && user["spacecss"].present? &&
                    newmember.user_profile.profile_background_upload.blank?
-                # profile background
                 if matched = user["spacecss"].match(/body\s*{[^}]*url\('?(.+?)'?\)/i)
                   body_background = matched[1].split(ORIGINAL_SITE_PREFIX, 2).last
                 end
@@ -280,34 +862,38 @@ class ImportScripts::DiscuzX < ImportScripts::Base
                       header_background,
                       blocktitle_background,
                     )
+                  profile_background_path = snapshot_file(profile_background)
                   upload =
-                    create_upload(
-                      newmember.id,
-                      File.join(DISCUZX_BASE_DIR, profile_background),
-                      File.basename(profile_background),
-                    )
+                    profile_background_path &&
+                      create_upload(
+                        newmember.id,
+                        profile_background_path,
+                        File.basename(profile_background),
+                      )
                   if upload
                     newmember.user_profile.upload_profile_background upload
                   else
-                    puts "WARNING: #{user["username"]} (UID: #{user["id"]}) profile_background file did not persist!"
+                    @source_skip_counts["profile_background_file_missing_from_snapshot"] += 1
                   end
+                  card_background_path = snapshot_file(card_background)
                   upload =
-                    create_upload(
-                      newmember.id,
-                      File.join(DISCUZX_BASE_DIR, card_background),
-                      File.basename(card_background),
-                    )
+                    card_background_path &&
+                      create_upload(
+                        newmember.id,
+                        card_background_path,
+                        File.basename(card_background),
+                      )
                   if upload
                     newmember.user_profile.upload_card_background upload
                   else
-                    puts "WARNING: #{user["username"]} (UID: #{user["id"]}) card_background file did not persist!"
+                    @source_skip_counts["card_background_file_missing_from_snapshot"] += 1
                   end
                 end
               end
 
-              # we don't send email to the unconfirmed user
-              if newmember.email_digests
-                newmember.update(email_digests: user["email_confirmed"] == 1)
+              user_option = newmember.user_option
+              if user_option.email_digests
+                user_option.update(email_digests: user["email_confirmed"] == 1)
               end
               if newmember.name.present? && newmember.name == newmember.username
                 newmember.update(name: "")
@@ -316,6 +902,27 @@ class ImportScripts::DiscuzX < ImportScripts::Base
         }
       end
     end
+  end
+
+  def discuz_timestamp(value)
+    return if value.blank? || value.to_i <= 0
+
+    Time.zone.at(value.to_i)
+  end
+
+  def create_user(opts, import_id)
+    password_hash = opts.delete(:discuz_password_hash)
+    password_salt = opts.delete(:discuz_password_salt)
+    user = super
+    return user unless user&.persisted?
+
+    user.custom_fields["discuz_password_hash"] = password_hash if password_hash.present?
+    user.custom_fields["discuz_password_salt"] = password_salt if password_salt.present?
+    user.save_custom_fields if password_hash.present? || password_salt.present?
+    user
+  ensure
+    password_hash = nil
+    password_salt = nil
   end
 
   def import_categories
@@ -330,27 +937,47 @@ class ImportScripts::DiscuzX < ImportScripts::Base
       mysql_query(
         "
           SELECT f.fid id, f.fup parent_id, f.name, f.type type, f.status status, f.displayorder position,
-                 d.description description, d.rules rules, d.icon, d.extra extra
+                 d.description description, d.rules rules, d.icon, d.extra extra,
+                 d.viewperm, d.formulaperm, d.password forum_password,
+                 d.postperm, d.replyperm,
+                 EXISTS (
+                   SELECT 1 FROM #{table_name("forum_access")} access
+                    WHERE access.fid = f.fid AND access.allowview <> 0
+                 ) has_user_view_override
             FROM #{forums_table} f
             LEFT JOIN #{forums_data_table} d USING(fid)
            ORDER BY parent_id ASC, id ASC
         ",
-      )
+      ).to_a
 
-    max_position = Category.all.max_by(&:position).position
-    create_categories(results) do |row|
+    @category_rows_by_id = results.index_by { |row| row["id"].to_i }
+    @source_medals_enabled =
+      mysql_query(
+        "SELECT COUNT(*) count FROM #{table_name("forum_medal")} WHERE available = 1",
+      ).first[
+        "count"
+      ].to_i.positive?
+    @source_category_read_restricted =
+      DiscuzCategoryPermissions.source_category_read_restrictions(
+        results,
+        medals_enabled: @source_medals_enabled,
+      )
+    @category_display_names = category_display_names(results)
+    max_position = Category.maximum(:position) || 0
+    ordered_results = results.sort_by { |row| [category_depth(row, results), row["id"].to_i] }
+    create_categories(ordered_results) do |row|
       next if row["type"] == "group" || row["status"] == 2 # or row['status'].to_i == 3 # 如果不想导入群组，取消注释
       extra = PHP.unserialize(row["extra"]) if row["extra"].present?
       color = extra["namecolor"][1, 6] if extra && extra["namecolor"].present?
-
-      Category.all.max_by(&:position).position
+      read_restricted = @source_category_read_restricted[row["id"].to_i]
 
       h = {
         id: row["id"],
-        name: row["name"],
+        name: @category_display_names.fetch(row["id"].to_i),
         description: row["description"],
         position: row["position"].to_i + max_position,
         color: color,
+        read_restricted: read_restricted,
         post_create_action:
           lambda do |category|
             if slug = @category_slug[row["id"]]
@@ -367,23 +994,25 @@ class ImportScripts::DiscuzX < ImportScripts::Base
                 end
             end
             category.topic.posts.first.update_attribute(:raw, raw)
-            if !row["icon"].empty?
+            if row["icon"].present? && attachments_enabled?
+              icon_path = snapshot_file(File.join(ATTACHMENT_DIR, "../common", row["icon"]))
               upload =
-                create_upload(
-                  Discourse::SYSTEM_USER_ID,
-                  File.join(DISCUZX_BASE_DIR, ATTACHMENT_DIR, "../common", row["icon"]),
-                  File.basename(row["icon"]),
-                )
+                icon_path &&
+                  create_upload(Discourse::SYSTEM_USER_ID, icon_path, File.basename(row["icon"]))
               if upload
                 category.uploaded_logo_id = upload.id
                 # FIXME: I don't know how to get '/shared' by script. May change to Rails.root
-                category.color =
-                  Miro::DominantColors.new(File.join("/shared", upload.url)).to_hex.first[
-                    1,
-                    6
-                  ] if !color
+                unless color
+                  require "miro" unless defined?(Miro::DominantColors)
+                  category.color =
+                    Miro::DominantColors.new(File.join("/shared", upload.url)).to_hex.first[1, 6]
+                end
                 category.save!
+              else
+                @source_skip_counts["category_icon_file_missing_from_snapshot"] += 1
               end
+            elsif row["icon"].present?
+              @source_skip_counts["category_icons_deferred_until_snapshot"] += 1
             end
 
             if row["status"] == 0 || row["status"] == 3
@@ -400,21 +1029,133 @@ class ImportScripts::DiscuzX < ImportScripts::Base
       end
       h
     end
+
+    category_access_rows =
+      results.filter_map do |row|
+        next if row["type"] == "group" || row["status"] == 2
+
+        category_id = category_id_from_imported_category_id(row["id"])
+        category = Category.find_by(id: category_id) if category_id
+        next unless category
+
+        read_restricted = @source_category_read_restricted[row["id"].to_i]
+        write_restricted = DiscuzCategoryPermissions.write_restricted?(row)
+        [category, row, read_restricted, write_restricted]
+      end
+
+    Category.transaction do
+      # Close access bottom-up first, then open source-public categories
+      # top-down. This keeps every intermediate tree valid and avoids exposing
+      # a category before its parent is public.
+      category_access_rows
+        .sort_by { |_category, row, _read, _write| [-category_depth(row, results), row["id"].to_i] }
+        .each do |category, _row, _read, _write|
+          category.set_permissions("staff" => :full)
+          category.save!
+        end
+
+      category_access_rows
+        .sort_by { |_category, row, _read, _write| [category_depth(row, results), row["id"].to_i] }
+        .each do |category, row, read_restricted, write_restricted|
+          apply_category_access_fallback(category, row, read_restricted, write_restricted)
+          @category_access_summary[read_restricted ? "restricted_staff_only" : "public"] += 1
+          @category_access_summary["public_read_only"] += 1 if !read_restricted && write_restricted
+          if row["has_user_view_override"].to_i.positive?
+            @category_access_summary["user_view_overrides_deferred"] += 1
+          end
+        end
+    end
+
+    puts "Category access fallback: #{@category_access_summary.sort.map { |name, count| "#{name}=#{count}" }.join(", ")}"
+  end
+
+  def category_depth(row, rows)
+    rows_by_id = @category_rows_by_id ||= rows.index_by { |category| category["id"].to_i }
+    depth = 0
+    parent_id = row["parent_id"].to_i
+    visited = Set.new
+    while parent_id.positive? && !visited.include?(parent_id) && (parent = rows_by_id[parent_id])
+      visited.add(parent_id)
+      depth += 1
+      parent_id = parent["parent_id"].to_i
+    end
+    depth
+  end
+
+  def category_display_names(rows)
+    eligible = rows.reject { |row| row["type"] == "group" || row["status"].to_i == 2 }
+    eligible_ids = eligible.map { |row| row["id"].to_i }.to_set
+    existing_imported_ids = CategoryCustomField.where(name: "import_id").select(:category_id)
+    reserved_root_names =
+      Category
+        .where(parent_category_id: nil)
+        .where.not(id: existing_imported_ids)
+        .pluck(:name)
+        .map { |name| name.to_s.strip[0..49].downcase }
+        .to_set
+    grouped =
+      eligible.group_by do |row|
+        parent_id = row["parent_id"].to_i
+        effective_parent = eligible_ids.include?(parent_id) ? parent_id : nil
+        source_name = row["name"].to_s.strip
+        source_name = "Blank" if source_name.empty?
+        [effective_parent, source_name[0..49].downcase]
+      end
+
+    names = {}
+    grouped.each do |(parent_id, base_name), members|
+      collision = members.length > 1 || (parent_id.nil? && reserved_root_names.include?(base_name))
+      members.each do |row|
+        source_name = row["name"].to_s.strip
+        source_name = "Blank" if source_name.empty?
+        source_name = source_name[0..49]
+        if collision
+          suffix = " [DZ #{row["id"]}]"
+          source_name = source_name[0, 50 - suffix.length] + suffix
+        end
+        names[row["id"].to_i] = source_name
+      end
+    end
+    names
+  end
+
+  def apply_category_access_fallback(category, row, read_restricted, write_restricted)
+    permissions =
+      if read_restricted
+        { "staff" => :full }
+      elsif write_restricted
+        { "everyone" => :readonly, "staff" => :full }
+      else
+        { "everyone" => :full }
+      end
+    category.set_permissions(permissions)
+    category.save!
+    category.custom_fields["discuz_viewperm_configured"] = row["viewperm"].present?
+    category.custom_fields["discuz_formulaperm_configured"] = row["formulaperm"].present?
+    category.custom_fields["discuz_password_protected"] = row["forum_password"].present?
+    category.custom_fields["discuz_postperm_configured"] = row["postperm"].present?
+    category.custom_fields["discuz_replyperm_configured"] = row["replyperm"].present?
+    category.custom_fields["discuz_user_view_overrides_present"] = row[
+      "has_user_view_override"
+    ].to_i.positive?
+    category.save_custom_fields
   end
 
   def import_posts
     puts "", "creating topics and posts"
 
-    users_table = table_name "common_member"
-    posts_table = table_name "forum_post"
-    topics_table = table_name "forum_thread"
-
-    total_count = mysql_query("SELECT count(*) count FROM #{posts_table}").first["count"]
+    posts_table = table_name("forum_post")
+    topics_table = table_name("forum_thread")
+    post_filter = "WHERE p.tid IN (#{sample_id_sql("topic_ids")})" if @sample_manifest
+    total_count =
+      mysql_query(
+        "SELECT count(*) count FROM #{posts_table} p#{post_filter ? " WHERE p.tid IN (#{sample_id_sql("topic_ids")})" : ""}",
+      ).first[
+        "count"
+      ]
 
     batches(BATCH_SIZE) do |offset|
-      results =
-        mysql_query(
-          "
+      results = mysql_query(<<~SQL)
             SELECT p.pid id,
                    p.tid topic_id,
                    t.fid category_id,
@@ -423,96 +1164,158 @@ class ImportScripts::DiscuzX < ImportScripts::Base
                    p.message raw,
                    p.dateline post_time,
                    p2.pid first_id,
+                   p2.invisible first_post_status,
+                   EXISTS (
+                     SELECT 1 FROM #{table_name("forum_attachment")} attachment
+                      WHERE attachment.pid = p.pid
+                   ) has_attachment,
+                   CHAR_LENGTH(TRIM(COALESCE(p.message, ''))) = 0 blank_message,
                    p.invisible status,
+                   t.displayorder thread_status,
                    t.special special
               FROM #{posts_table} p
-              JOIN #{posts_table} p2 ON p2.first AND p2.tid = p.tid
-              JOIN #{topics_table} t ON t.tid = p.tid
-             ORDER BY id ASC, topic_id ASC
+              LEFT JOIN #{topics_table} t ON t.tid = p.tid
+              LEFT JOIN #{posts_table} p2 ON p2.first = 1 AND p2.tid = p.tid
+             #{post_filter}
+             ORDER BY COALESCE(p2.pid, p.pid) ASC, p.first DESC, p.pid ASC
              LIMIT #{BATCH_SIZE}
             OFFSET #{offset};
-          ",
-        )
-      # u.status != -1 AND u.groupid != 4 AND u.groupid != 5 用户未被锁定、禁访或禁言。在现实中的 Discuz 论坛，禁止的用户通常是广告机或驱逐的用户，这些不需要导入。
+          SQL
+
       break if results.size < 1
 
-      next if all_records_exist? :posts, results.map { |p| p["id"].to_i }
+      create_posts(results, total: total_count, offset: offset) do |row|
+        if row["category_id"].nil?
+          @source_skip_counts["post_without_thread"] += 1
+          next nil
+        end
+        if row["first_id"].nil?
+          @source_skip_counts["post_without_first_post"] += 1
+          next nil
+        end
 
-      create_posts(results, total: total_count, offset: offset) do |m|
-        skip = false
-        mapped = {}
+        imported_user_id = user_id_from_imported_user_id(row["user_id"])
+        unless imported_user_id
+          @source_skip_counts["post_author_unmapped"] += 1
+          next nil
+        end
 
-        mapped[:id] = m["id"]
-        mapped[:user_id] = user_id_from_imported_user_id(m["user_id"]) || -1
-        mapped[:raw] = process_discuzx_post(m["raw"], m["id"])
-        mapped[:created_at] = Time.zone.at(m["post_time"])
-        mapped[:tags] = m["tags"]
+        mapped = {
+          id: row["id"],
+          user_id: imported_user_id,
+          raw: process_discuzx_post(row["raw"], row["id"]),
+          created_at: Time.zone.at(row["post_time"]),
+          tags: row["tags"],
+          custom_fields: {
+            "discuz_invisible" => row["status"].to_i,
+            "discuz_thread_displayorder" => row["thread_status"].to_i,
+          },
+        }
 
-        if m["id"] == m["first_id"]
-          mapped[:category] = category_id_from_imported_category_id(m["category_id"])
-          mapped[:title] = CGI.unescapeHTML(m["title"])
+        is_first_post = row["id"].to_i == row["first_id"].to_i
+        if is_first_post
+          mapped[:category] = category_id_from_imported_category_id(row["category_id"])
+          unless mapped[:category]
+            @source_skip_counts["post_category_unmapped"] += 1
+            next nil
+          end
+          mapped[:title] = CGI.unescapeHTML(row["title"])
 
-          if m["special"] == 1
-            results =
+          if row["special"] == 1
+            poll =
               mysql_query(
-                "
-              SELECT multiple, maxchoices
-              FROM #{table_name "forum_poll"}
-              WHERE tid = #{m["topic_id"]}",
-              )
-            poll = results.first || {}
-            results =
+                "SELECT multiple, maxchoices FROM #{table_name("forum_poll")} WHERE tid = #{row["topic_id"]}",
+              ).first || {}
+            options =
               mysql_query(
-                "
-              SELECT polloption
-              FROM #{table_name "forum_polloption"}
-              WHERE tid = #{m["topic_id"]}
-              ORDER BY displayorder",
+                "SELECT polloption FROM #{table_name("forum_polloption")} WHERE tid = #{row["topic_id"]} ORDER BY displayorder",
               )
-            if results.empty?
-              puts "WARNING: can't find poll options for topic #{m["topic_id"]}, skip poll"
+            if options.size.zero?
+              puts "WARNING: missing poll options for source topic #{row["topic_id"]}"
             else
-              mapped[
-                :raw
-              ].prepend "[poll#{poll["multiple"] ? " type=multiple" : ""}#{poll["maxchoices"] > 0 ? " max=#{poll["maxchoices"]}" : ""}]\n#{results.map { |option| "- " + option["polloption"] }.join("\n")}\n[/poll]\n"
+              mapped[:raw].prepend(
+                "[poll#{poll["multiple"] ? " type=multiple" : ""}#{poll["maxchoices"].to_i > 0 ? " max=#{poll["maxchoices"]}" : ""}]\n" +
+                  "#{options.map { |option| "- #{option["polloption"]}" }.join("\n")}\n[/poll]\n",
+              )
             end
           end
         else
-          parent = topic_lookup_from_imported_post_id(m["first_id"])
+          parent = topic_lookup_from_imported_post_id(row["first_id"])
+          unless parent
+            @source_skip_counts["post_parent_unimported"] += 1
+            next nil
+          end
 
-          if parent
-            mapped[:topic_id] = parent[:topic_id]
-            reply_post_import_id = find_post_id_by_quote_number(m["raw"])
-            if reply_post_import_id
-              post_id = post_id_from_imported_post_id(reply_post_import_id.to_i)
-              if (post = Post.find_by(id: post_id))
-                if post.topic_id == mapped[:topic_id]
-                  mapped[:reply_to_post_number] = post.post_number
-                else
-                  puts "post #{m["id"]} reply to another topic, skip reply"
-                end
+          mapped[:topic_id] = parent[:topic_id]
+          reply_post_import_id = find_post_id_by_quote_number(row["raw"])
+          if reply_post_import_id
+            post_id = post_id_from_imported_post_id(reply_post_import_id.to_i)
+            if (post = Post.find_by(id: post_id))
+              if post.topic_id == mapped[:topic_id]
+                mapped[:reply_to_post_number] = post.post_number
               else
-                puts "post #{m["id"]} reply to not exists post #{reply_post_import_id}, skip reply"
+                puts "Source post #{row["id"]} quotes a post in another topic"
               end
+            else
+              puts "Source post #{row["id"]} quotes an unavailable imported post"
             end
-          else
-            puts "Parent topic #{m["topic_id"]} doesn't exist. Skipping #{m["id"]}: #{m["title"][0..40]}"
-            skip = true
           end
         end
 
-        if m["status"] & 1 == 1 || mapped[:raw].blank?
-          mapped[:post_create_action] = lambda do |action_post|
-            PostDestroyer.new(Discourse.system_user, action_post).perform_delete
+        if row["status"].to_i != 0 || row["thread_status"].to_i < 0 ||
+             row["first_post_status"].to_i != 0 ||
+             (
+               (row["blank_message"].to_i == 1 || mapped[:raw].blank?) &&
+                 row["has_attachment"].to_i != 1
+             )
+          is_first_post = row["id"].to_i == row["first_id"].to_i
+          if existing_post_id = post_id_from_imported_post_id(row["id"].to_s)
+            @deferred_visibility_actions << [existing_post_id, is_first_post]
           end
-        elsif (m["status"] & 2) >> 1 == 1 # waiting for approve
-          mapped[:post_create_action] = lambda do |action_post|
-            PostActionCreator.notify_user(Discourse.system_user, action_post)
+          mapped[:post_create_action] = lambda do |created_post|
+            @deferred_visibility_actions << [created_post.id, is_first_post]
           end
         end
-        skip ? nil : mapped
+
+        mapped
       end
     end
+
+    apply_deferred_visibility_actions
+  end
+
+  def apply_deferred_visibility_actions
+    actions = @deferred_visibility_actions.uniq
+    first_post_actions, reply_actions = actions.partition { |_post_id, first_post| first_post }
+
+    [first_post_actions, reply_actions].each do |action_group|
+      action_group.each_slice(BATCH_SIZE) do |batch|
+        Post
+          .with_deleted
+          .where(id: batch.map(&:first))
+          .order(:id)
+          .each do |post|
+            next if post.deleted_at
+
+            PostDestroyer.new(
+              Discourse.system_user,
+              post,
+              context: "Imported Discuz visibility state",
+              skip_staff_log: true,
+            ).perform_delete
+          end
+      end
+    end
+
+    puts "Preserved #{actions.length} hidden or deleted Discuz posts in the staff-recoverable trash"
+  end
+
+  def report_source_skips
+    exclusions = @source_skip_counts.sort_by { |reason, _count| reason }
+    return if exclusions.empty?
+
+    puts "Discuz source exclusions:"
+    exclusions.each { |reason, count| puts "  #{reason}=#{count}" }
   end
 
   def import_bookmarks
@@ -549,115 +1352,124 @@ class ImportScripts::DiscuzX < ImportScripts::Base
   def import_private_messages
     puts "", "creating private messages"
 
-    pm_indexes = table_name "ucenter_pm_indexes"
-    pm_messages = table_name "ucenter_pm_messages"
-    total_count = mysql_query("SELECT count(*) count FROM #{pm_indexes}").first["count"]
+    message_tables = (0..9).map { |shard| ucenter_table_name("pm_messages_#{shard}") }
+    message_union =
+      message_tables
+        .map do |table|
+          filter = " WHERE plid IN (#{sample_id_sql("pm_thread_ids")})" if @sample_manifest
+          "SELECT pmid id, plid thread_id, authorid user_id, message, dateline created_at FROM #{table}#{filter}"
+        end
+        .join("\nUNION ALL\n")
+    total_count =
+      message_tables.sum do |table|
+        filter = " WHERE plid IN (#{sample_id_sql("pm_thread_ids")})" if @sample_manifest
+        mysql_query("SELECT count(*) count FROM #{table}#{filter}").first["count"].to_i
+      end
 
     batches(BATCH_SIZE) do |offset|
-      results =
-        mysql_query(
-          "
-            SELECT pmid id, plid thread_id, authorid user_id, message, dateline created_at
-              FROM #{pm_messages}_1
-      UNION SELECT pmid id, plid thread_id, authorid user_id, message, dateline created_at
-              FROM #{pm_messages}_2
-      UNION SELECT pmid id, plid thread_id, authorid user_id, message, dateline created_at
-              FROM #{pm_messages}_3
-      UNION SELECT pmid id, plid thread_id, authorid user_id, message, dateline created_at
-              FROM #{pm_messages}_4
-      UNION SELECT pmid id, plid thread_id, authorid user_id, message, dateline created_at
-              FROM #{pm_messages}_5
-      UNION SELECT pmid id, plid thread_id, authorid user_id, message, dateline created_at
-              FROM #{pm_messages}_6
-      UNION SELECT pmid id, plid thread_id, authorid user_id, message, dateline created_at
-              FROM #{pm_messages}_7
-      UNION SELECT pmid id, plid thread_id, authorid user_id, message, dateline created_at
-              FROM #{pm_messages}_8
-      UNION SELECT pmid id, plid thread_id, authorid user_id, message, dateline created_at
-              FROM #{pm_messages}_9
-          ORDER BY thread_id ASC, id ASC
+      results = mysql_query(<<~SQL)
+            SELECT *
+              FROM (#{message_union}) messages
+             ORDER BY thread_id ASC, id ASC
              LIMIT #{BATCH_SIZE}
-            OFFSET #{offset};",
-        )
+            OFFSET #{offset};
+          SQL
 
       break if results.size < 1
 
-      # next if all_records_exist? :posts, results.map {|m| "pm:#{m['id']}"}
+      create_posts(results, total: total_count, offset: offset) do |message|
+        thread_id = message["thread_id"].to_i
+        import_id = "pm:#{message["id"]}"
+        first_message = !@seen_pm_thread_ids.add?(thread_id).nil?
 
-      create_posts(results, total: total_count, offset: offset) do |m|
-        skip = false
-        mapped = {}
-
-        mapped[:id] = "pm:#{m["id"]}"
-        mapped[:user_id] = user_id_from_imported_user_id(m["user_id"]) || -1
-        mapped[:raw] = process_discuzx_post(m["message"], m["id"])
-        mapped[:created_at] = Time.zone.at(m["created_at"])
-        thread_id = "pm_#{m["thread_id"]}"
-
-        if is_first_pm(m["id"], m["thread_id"])
-          # find the title from list table
-          pm_thread =
-            mysql_query(
-              "
-                SELECT plid thread_id, subject
-                  FROM #{table_name "ucenter_pm_lists"}
-                 WHERE plid = #{m["thread_id"]};",
-            ).first
-          mapped[:title] = pm_thread["subject"]
-          mapped[:archetype] = Archetype.private_message
-
-          # Find the users who are part of this private message.
-          import_user_ids =
-            mysql_query(
-              "
-                SELECT plid thread_id, uid user_id
-                  FROM #{table_name "ucenter_pm_members"}
-                 WHERE plid = #{m["thread_id"]};
-              ",
-            ).map { |r| r["user_id"] }.uniq
-
-          mapped[:target_usernames] = import_user_ids
-            .map! do |import_user_id|
-              if import_user_id.to_s == m["user_id"].to_s
-                nil
-              else
-                User.find_by(id: user_id_from_imported_user_id(import_user_id)).try(:username)
-              end
-            end
-            .compact
-
-          if mapped[:target_usernames].empty? # pm with yourself?
-            skip = true
-            puts "Skipping pm:#{m["id"]} due to no target"
-          else
-            @first_post_id_by_topic_id[thread_id] = mapped[:id]
-          end
-        else
-          parent = topic_lookup_from_imported_post_id(@first_post_id_by_topic_id[thread_id])
-          if parent
-            mapped[:topic_id] = parent[:topic_id]
-          else
-            puts "Parent post pm thread:#{thread_id} doesn't exist. Skipping #{m["id"]}: #{m["message"][0..40]}"
-            skip = true
-          end
+        if @unimportable_pm_thread_ids.include?(thread_id)
+          @source_skip_counts["pm_thread_unimportable"] += 1
+          next nil
         end
 
-        skip ? nil : mapped
+        imported_author_id = user_id_from_imported_user_id(message["user_id"])
+        unless imported_author_id
+          @source_skip_counts["pm_author_unmapped"] += 1
+          @unimportable_pm_thread_ids.add(thread_id) if first_message
+          next nil
+        end
+
+        mapped = {
+          id: import_id,
+          user_id: imported_author_id,
+          raw: process_discuzx_post(message["message"], message["id"]),
+          created_at: Time.zone.at(message["created_at"]),
+        }
+
+        if first_message
+          pm_thread =
+            mysql_query(
+              "SELECT subject, pmtype, min_max FROM #{ucenter_table_name("pm_lists")} WHERE plid = #{thread_id};",
+            ).first
+          unless pm_thread
+            @source_skip_counts["pm_thread_metadata_missing"] += 1
+            @unimportable_pm_thread_ids.add(thread_id)
+            next nil
+          end
+
+          member_uids =
+            mysql_query(
+              "SELECT uid FROM #{ucenter_table_name("pm_members")} WHERE plid = #{thread_id};",
+            ).map { |row| row["uid"].to_i }.uniq
+          if pm_thread["pmtype"].to_i == 1
+            pair = pm_thread["min_max"].to_s.split("_", -1)
+            unless pair.length == 2 && pair.all? { |uid| uid.match?(/\A[1-9][0-9]*\z/) } &&
+                     pair.map(&:to_i).include?(message["user_id"].to_i)
+              @source_skip_counts["pm_one_to_one_pair_invalid"] += 1
+              @unimportable_pm_thread_ids.add(thread_id)
+              next nil
+            end
+            member_uids |= pair.map(&:to_i)
+          end
+          if member_uids.empty?
+            @source_skip_counts["pm_participants_missing"] += 1
+            @unimportable_pm_thread_ids.add(thread_id)
+            next nil
+          end
+
+          participants = member_uids.map { |uid| [uid, user_id_from_imported_user_id(uid)] }
+          if participants.any? { |_uid, discourse_user_id| discourse_user_id.nil? }
+            @source_skip_counts["pm_participant_unmapped"] += 1
+            @unimportable_pm_thread_ids.add(thread_id)
+            next nil
+          end
+
+          targets =
+            participants
+              .filter_map do |uid, discourse_user_id|
+                next if uid == message["user_id"].to_i
+
+                User.find_by(id: discourse_user_id)&.username
+              end
+              .uniq
+          if targets.empty?
+            @source_skip_counts["pm_without_recipient"] += 1
+            @unimportable_pm_thread_ids.add(thread_id)
+            next nil
+          end
+
+          mapped[:title] = pm_thread["subject"]
+          mapped[:archetype] = Archetype.private_message
+          mapped[:target_usernames] = targets
+          @first_post_id_by_topic_id[thread_id] = import_id
+        else
+          parent = topic_lookup_from_imported_post_id(@first_post_id_by_topic_id[thread_id])
+          unless parent
+            @source_skip_counts["pm_parent_unimported"] += 1
+            next nil
+          end
+
+          mapped[:topic_id] = parent[:topic_id]
+        end
+
+        mapped
       end
     end
-  end
-
-  # search for first pm id for the series of pm
-  def is_first_pm(pm_id, thread_id)
-    result =
-      mysql_query(
-        "
-          SELECT pmid id
-            FROM #{table_name "ucenter_pm_indexes"}
-           WHERE plid = #{thread_id}
-        ORDER BY id",
-      )
-    result.first["id"].to_s == pm_id.to_s
   end
 
   def process_and_upload_inline_images(raw)
@@ -960,7 +1772,8 @@ class ImportScripts::DiscuzX < ImportScripts::Base
         attachment_file = $1
 
         filename = File.basename(attachment_file)
-        upload = create_upload(user.id, File.join(DISCUZX_BASE_DIR, attachment_file), filename)
+        path = snapshot_file(attachment_file)
+        upload = create_upload(user.id, path, filename) if path
         unless upload
           fail_count += 1
           next
@@ -1123,9 +1936,9 @@ class ImportScripts::DiscuzX < ImportScripts::Base
       return nil
     end
 
-    filename = File.join(DISCUZX_BASE_DIR, ATTACHMENT_DIR, row["attachment_path"])
-    unless File.exist?(filename)
-      puts "Attachment file doesn't exist: #{filename}"
+    filename = snapshot_file(File.join(ATTACHMENT_DIR, row["attachment_path"]))
+    unless filename
+      @source_skip_counts["attachment_file_missing_from_snapshot"] += 1
       return nil
     end
     real_filename = row["real_filename"]
@@ -1155,4 +1968,4 @@ class ImportScripts::DiscuzX < ImportScripts::Base
   end
 end
 
-ImportScripts::DiscuzX.new.perform
+ImportScripts::DiscuzX.new.perform if $PROGRAM_NAME == __FILE__
