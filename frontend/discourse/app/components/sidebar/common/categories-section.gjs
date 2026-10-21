@@ -49,6 +49,7 @@ export default class SidebarCommonCategoriesSection extends Component {
       (filteredCategories, category) => {
         if (
           categoryIds.includes(category.id) &&
+          !category.parent_category_id &&
           canDisplayCategory(category.id, this.siteSettings)
         ) {
           filteredCategories.push(category);

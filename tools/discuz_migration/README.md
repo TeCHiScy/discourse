@@ -91,16 +91,20 @@ topics with user replies or staff edits are preserved. It also removes the untou
 unimported `General` seed category only when it has no active topics or children and its
 category definition remains system-authored. Imported or edited categories and categories
 with content are preserved. `Uncategorized` remains. The acceptance report checks locale, Unicode usernames, remaining
-seed topics, residual unimported `General` categories, dangling default category settings, and
-exact sidebar coverage of imported categories, in addition to imported identities and content.
+seed topics, residual unimported `General` categories, dangling default category settings,
+exact sidebar coverage of imported root categories, and the absence of imported child-category
+links in user sidebars, in addition to imported identities and content.
 It also fails if either untouched `Site Feedback` or `Staff` category remains.
 
 After category import and seed cleanup, the importer sets Discourse's existing
-`default_navigation_menu_categories` site setting to all imported Discuz categories.
-This puts accessible categories directly in the sidebar's Categories section for
-anonymous and signed-in users; Discourse still filters links using each viewer's category
-permissions. The Categories section starts expanded by default in Discourse. Users can
-collapse it in their own sidebar, and that preference is stored by the browser.
+`default_navigation_menu_categories` site setting to imported Discuz root categories only.
+This keeps the sidebar's Categories section compact for anonymous and signed-in users;
+the sidebar component also filters saved user selections to root categories, so a user's
+older or custom child-category links are not displayed there. Child categories remain in
+the imported parent-child hierarchy and are available from the full category listing.
+Discourse still filters links using each viewer's category permissions. The Categories
+section starts expanded by default in Discourse. Users can collapse it in their own
+sidebar, and that preference is stored by the browser.
 
 Attachment conversion follows Discuz's explicit `[attach]aid[/attach]` behavior:
 image attachments become inline Discourse uploads, while other files become download

@@ -2566,10 +2566,19 @@ class DiscuzImportVerifier
       default_navigation_category_ids -
         Category.where(id: default_navigation_category_ids).pluck(:id)
     default_navigation_category_set = default_navigation_category_ids.to_set
-    missing_imported_sidebar_category_ids = imported_category_ids - default_navigation_category_set
-    unexpected_sidebar_category_ids = default_navigation_category_set - imported_category_ids
-    default_sidebar_categories_match_imports =
-      missing_imported_sidebar_category_ids.empty? && unexpected_sidebar_category_ids.empty?
+    imported_root_category_ids =
+      Category.where(id: imported_category_ids.to_a, parent_category_id: nil).pluck(:id).to_set
+    missing_imported_root_sidebar_category_ids =
+      imported_root_category_ids - default_navigation_category_set
+    unexpected_sidebar_category_ids = default_navigation_category_set - imported_root_category_ids
+    default_sidebar_categories_match_imported_roots =
+      missing_imported_root_sidebar_category_ids.empty? && unexpected_sidebar_category_ids.empty?
+    nested_imported_category_ids = imported_category_ids - imported_root_category_ids
+    nested_imported_sidebar_link_count =
+      SidebarSectionLink.where(
+        linkable_type: "Category",
+        linkable_id: nested_imported_category_ids.to_a,
+      ).count
     failure_count =
       (locale_matches ? 0 : 1) + (unicode_usernames_enabled ? 0 : 1) +
         remaining_seed_topics.length + unimported_general_categories.length +
@@ -2577,7 +2586,8 @@ class DiscuzImportVerifier
         active_topics_in_default_forum_categories.length +
         (missing_general_setting_target ? 1 : 0) + (missing_default_composer_category ? 1 : 0) +
         missing_default_navigation_category_ids.length +
-        (default_sidebar_categories_match_imports ? 0 : 1)
+        (default_sidebar_categories_match_imported_roots ? 0 : 1) +
+        (nested_imported_sidebar_link_count.zero? ? 0 : 1)
 
     {
       default_locale: SiteSetting.default_locale,
@@ -2599,10 +2609,14 @@ class DiscuzImportVerifier
       missing_general_setting_target: missing_general_setting_target,
       missing_default_composer_category: missing_default_composer_category,
       default_navigation_category_ids: default_navigation_category_ids,
+      expected_default_sidebar_category_ids: imported_root_category_ids.to_a.sort,
       missing_default_navigation_category_ids: missing_default_navigation_category_ids,
-      missing_imported_sidebar_category_ids: missing_imported_sidebar_category_ids.to_a.sort,
+      missing_imported_root_sidebar_category_ids:
+        missing_imported_root_sidebar_category_ids.to_a.sort,
       unexpected_sidebar_category_ids: unexpected_sidebar_category_ids.to_a.sort,
-      default_sidebar_categories_match_imports: default_sidebar_categories_match_imports,
+      default_sidebar_categories_match_imported_roots:
+        default_sidebar_categories_match_imported_roots,
+      nested_imported_sidebar_link_count: nested_imported_sidebar_link_count,
       default_category_cleanup_policy:
         "remove untouched Site Feedback and Staff seed categories before importing Discuz categories; retain their positive setting IDs as tombstones to prevent reseeding",
       general_category_cleanup_policy:

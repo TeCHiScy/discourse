@@ -525,7 +525,12 @@ class ImportScripts::DiscuzX < ImportScripts::Base
       raise "one or more imported Discuz categories are missing from the Discourse database"
     end
 
-    desired_categories = target_category_ids.join("|")
+    sidebar_category_ids =
+      Category
+        .where(id: target_category_ids, parent_category_id: nil)
+        .order(:position, :id)
+        .pluck(:id)
+    desired_categories = sidebar_category_ids.join("|")
     SiteSetting.default_navigation_menu_categories =
       desired_categories unless SiteSetting.default_navigation_menu_categories == desired_categories
 
@@ -533,7 +538,10 @@ class ImportScripts::DiscuzX < ImportScripts::Base
       raise "failed to configure the default sidebar categories for Discuz import"
     end
 
-    puts "Configured #{target_category_ids.length} imported Discuz categories as default sidebar links"
+    puts(
+      "Configured #{sidebar_category_ids.length} imported root Discuz categories " \
+        "(#{target_category_ids.length} imported categories total) as default sidebar links",
+    )
   end
 
   def configure_site_for_discuz_import!
