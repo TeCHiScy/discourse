@@ -16,6 +16,52 @@ This check validates the MySQL baseline restore; an importer-level acceptance re
 compares Discuz source records with imported Discourse records and reports intentional
 omissions or unmapped identities.
 
+## Schema field coverage audit
+
+`audit_import_coverage.rb` inventories every column in the local bbs and ucenter
+baseline through information_schema in a read-only MySQL transaction. By default it
+also includes the separate schema-only extend_flydata supplement captured from
+sinofsx-db on 2026-10-21 at
+schema_snapshots/extend-flydata-20261021.json; this supplement is not part of the
+baseline dump. That remote query read only column metadata over the server-local MySQL
+socket and did not select application rows. The metadata for
+extend_flydata.common_cert.password was explicitly excluded. The audit does not connect
+to PostgreSQL or write to either database. Reviewed decisions live in
+field_coverage_policy.yml; every column without an explicit policy defaults to
+pending_review, so an unimplemented or undecided field is never silently called
+unnecessary. Use --without-external-schema-manifest for a baseline-only report.
+
+The CSV includes one row per source field, its type, disposition, Discourse target or
+reason, and code/decision evidence. The JSON summary counts fields by disposition and
+highlights tables with known gaps. Dispositions are:
+
+- `migrated_direct`: copied to a corresponding Discourse/plugin field without a semantic
+  conversion.
+- `migrated_adapted`: mapped through ID translation, parsing, normalization, rendering,
+  or a plugin-specific representation.
+- `logic_only`: read to select, join, validate, or transform imported data, with no separate
+  target field.
+- `not_needed`: an explicit reviewed decision says the source field is transient, derived,
+  or belongs to a feature excluded from this migration.
+- `pending_review`: no complete mapping or approved omission decision is recorded. The
+  policy may include a specific known gap; otherwise this means it still needs review.
+
+Run it from this checkout using the local MySQL container password only as a
+process environment value; the command does not print it or write it to a file:
+
+```sh
+MYSQL_PWD="$(docker inspect discourse-lab-mysql | jq -r '.[0].Config.Env[] | select(startswith("MYSQL_ROOT_PASSWORD=")) | sub("^MYSQL_ROOT_PASSWORD="; "")')"
+export MYSQL_PWD
+DISCUZX_DB_USER=root RBENV_VERSION=3.4.7 rbenv exec ruby tools/discuz_migration/audit_import_coverage.rb
+unset MYSQL_PWD
+```
+
+By default it writes a schema-only CSV and JSON summary under
+`tools/discuz_migration/reports/`. These reports describe schema mapping coverage, not
+row-level completeness; use `verify_import.rb` for imported-record and relationship checks.
+Rerun the audit after changing the importer or policy, then review and commit the updated
+report with those changes.
+
 ## Import rehearsal
 
 `verify_import.rb --source-preflight` reads the local MySQL baseline and checks source

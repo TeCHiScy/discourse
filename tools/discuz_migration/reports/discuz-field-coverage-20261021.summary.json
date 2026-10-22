@@ -1,0 +1,638 @@
+{
+  "generated_at_utc": "2026-10-21T13:31:22Z",
+  "source": {
+    "host": "127.0.0.1",
+    "port": 13306,
+    "schemas": [
+      "bbs",
+      "ucenter"
+    ],
+    "database_connection": "read-only transaction; information_schema only",
+    "external_schema_supplements": [
+      {
+        "manifest_file": "tools/discuz_migration/schema_snapshots/extend-flydata-20261021.json",
+        "schema": "extend_flydata",
+        "captured_on": "2026-10-21",
+        "capture_method": "sinofsx-db SSH session; MySQL information_schema over the server-local Unix socket",
+        "scope": "Column metadata only; no application rows were queried.",
+        "excluded_field_metadata": [
+          "extend_flydata.common_cert.password"
+        ],
+        "note": "Separate live schema supplement; not part of the local bbs/ucenter baseline dump.",
+        "table_count": 25,
+        "column_count": 187
+      }
+    ]
+  },
+  "policy_version": 1,
+  "total_tables": 377,
+  "total_columns": 3456,
+  "disposition_counts": {
+    "pending_review": 3021,
+    "not_needed": 98,
+    "migrated_adapted": 226,
+    "logic_only": 31,
+    "migrated_direct": 80
+  },
+  "by_database": {
+    "bbs": {
+      "pending_review": 2665,
+      "not_needed": 95,
+      "migrated_adapted": 168,
+      "logic_only": 28,
+      "migrated_direct": 79
+    },
+    "ucenter": {
+      "pending_review": 169,
+      "logic_only": 3,
+      "migrated_adapted": 58,
+      "migrated_direct": 1,
+      "not_needed": 3
+    },
+    "extend_flydata": {
+      "pending_review": 187
+    }
+  },
+  "top_pending_tables": [
+    {
+      "database": "bbs",
+      "table": "common_usergroup_field",
+      "column_count": 114,
+      "pending_review": 114,
+      "migrated_direct": 0,
+      "migrated_adapted": 0,
+      "logic_only": 0,
+      "not_needed": 0
+    },
+    {
+      "database": "bbs",
+      "table": "common_admingroup",
+      "column_count": 61,
+      "pending_review": 61,
+      "migrated_direct": 0,
+      "migrated_adapted": 0,
+      "logic_only": 0,
+      "not_needed": 0
+    },
+    {
+      "database": "bbs",
+      "table": "common_member_profile_history",
+      "column_count": 56,
+      "pending_review": 56,
+      "migrated_direct": 0,
+      "migrated_adapted": 0,
+      "logic_only": 0,
+      "not_needed": 0
+    },
+    {
+      "database": "bbs",
+      "table": "forum_forum",
+      "column_count": 48,
+      "pending_review": 42,
+      "migrated_direct": 0,
+      "migrated_adapted": 4,
+      "logic_only": 1,
+      "not_needed": 1
+    },
+    {
+      "database": "bbs",
+      "table": "common_member_profile",
+      "column_count": 54,
+      "pending_review": 40,
+      "migrated_direct": 0,
+      "migrated_adapted": 13,
+      "logic_only": 1,
+      "not_needed": 0
+    },
+    {
+      "database": "bbs",
+      "table": "common_member_profile_archive",
+      "column_count": 52,
+      "pending_review": 38,
+      "migrated_direct": 0,
+      "migrated_adapted": 13,
+      "logic_only": 1,
+      "not_needed": 0
+    },
+    {
+      "database": "bbs",
+      "table": "portal_article_title",
+      "column_count": 37,
+      "pending_review": 37,
+      "migrated_direct": 0,
+      "migrated_adapted": 0,
+      "logic_only": 0,
+      "not_needed": 0
+    },
+    {
+      "database": "bbs",
+      "table": "forum_forumfield",
+      "column_count": 46,
+      "pending_review": 36,
+      "migrated_direct": 0,
+      "migrated_adapted": 9,
+      "logic_only": 1,
+      "not_needed": 0
+    },
+    {
+      "database": "bbs",
+      "table": "forum_thread",
+      "column_count": 42,
+      "pending_review": 36,
+      "migrated_direct": 0,
+      "migrated_adapted": 6,
+      "logic_only": 0,
+      "not_needed": 0
+    },
+    {
+      "database": "bbs",
+      "table": "forum_tradelog",
+      "column_count": 36,
+      "pending_review": 36,
+      "migrated_direct": 0,
+      "migrated_adapted": 0,
+      "logic_only": 0,
+      "not_needed": 0
+    },
+    {
+      "database": "bbs",
+      "table": "common_stat",
+      "column_count": 31,
+      "pending_review": 31,
+      "migrated_direct": 0,
+      "migrated_adapted": 0,
+      "logic_only": 0,
+      "not_needed": 0
+    },
+    {
+      "database": "bbs",
+      "table": "forum_trade",
+      "column_count": 30,
+      "pending_review": 30,
+      "migrated_direct": 0,
+      "migrated_adapted": 0,
+      "logic_only": 0,
+      "not_needed": 0
+    },
+    {
+      "database": "bbs",
+      "table": "common_member_count_archive",
+      "column_count": 27,
+      "pending_review": 27,
+      "migrated_direct": 0,
+      "migrated_adapted": 0,
+      "logic_only": 0,
+      "not_needed": 0
+    },
+    {
+      "database": "bbs",
+      "table": "portal_category",
+      "column_count": 27,
+      "pending_review": 27,
+      "migrated_direct": 0,
+      "migrated_adapted": 0,
+      "logic_only": 0,
+      "not_needed": 0
+    },
+    {
+      "database": "bbs",
+      "table": "common_block",
+      "column_count": 26,
+      "pending_review": 26,
+      "migrated_direct": 0,
+      "migrated_adapted": 0,
+      "logic_only": 0,
+      "not_needed": 0
+    },
+    {
+      "database": "bbs",
+      "table": "home_pic",
+      "column_count": 26,
+      "pending_review": 26,
+      "migrated_direct": 0,
+      "migrated_adapted": 0,
+      "logic_only": 0,
+      "not_needed": 0
+    },
+    {
+      "database": "bbs",
+      "table": "common_block_copy",
+      "column_count": 25,
+      "pending_review": 25,
+      "migrated_direct": 0,
+      "migrated_adapted": 0,
+      "logic_only": 0,
+      "not_needed": 0
+    },
+    {
+      "database": "bbs",
+      "table": "home_blog",
+      "column_count": 25,
+      "pending_review": 25,
+      "migrated_direct": 0,
+      "migrated_adapted": 0,
+      "logic_only": 0,
+      "not_needed": 0
+    },
+    {
+      "database": "bbs",
+      "table": "home_feed",
+      "column_count": 25,
+      "pending_review": 25,
+      "migrated_direct": 0,
+      "migrated_adapted": 0,
+      "logic_only": 0,
+      "not_needed": 0
+    },
+    {
+      "database": "bbs",
+      "table": "common_block_item_data",
+      "column_count": 23,
+      "pending_review": 23,
+      "migrated_direct": 0,
+      "migrated_adapted": 0,
+      "logic_only": 0,
+      "not_needed": 0
+    },
+    {
+      "database": "bbs",
+      "table": "home_feed_app",
+      "column_count": 23,
+      "pending_review": 23,
+      "migrated_direct": 0,
+      "migrated_adapted": 0,
+      "logic_only": 0,
+      "not_needed": 0
+    },
+    {
+      "database": "ucenter",
+      "table": "feeds",
+      "column_count": 22,
+      "pending_review": 22,
+      "migrated_direct": 0,
+      "migrated_adapted": 0,
+      "logic_only": 0,
+      "not_needed": 0
+    },
+    {
+      "database": "bbs",
+      "table": "common_task",
+      "column_count": 21,
+      "pending_review": 21,
+      "migrated_direct": 0,
+      "migrated_adapted": 0,
+      "logic_only": 0,
+      "not_needed": 0
+    },
+    {
+      "database": "bbs",
+      "table": "forum_post",
+      "column_count": 30,
+      "pending_review": 21,
+      "migrated_direct": 0,
+      "migrated_adapted": 8,
+      "logic_only": 1,
+      "not_needed": 0
+    },
+    {
+      "database": "bbs",
+      "table": "common_payment_order",
+      "column_count": 20,
+      "pending_review": 20,
+      "migrated_direct": 0,
+      "migrated_adapted": 0,
+      "logic_only": 0,
+      "not_needed": 0
+    },
+    {
+      "database": "bbs",
+      "table": "portal_topic",
+      "column_count": 20,
+      "pending_review": 20,
+      "migrated_direct": 0,
+      "migrated_adapted": 0,
+      "logic_only": 0,
+      "not_needed": 0
+    },
+    {
+      "database": "bbs",
+      "table": "common_member",
+      "column_count": 25,
+      "pending_review": 19,
+      "migrated_direct": 0,
+      "migrated_adapted": 6,
+      "logic_only": 0,
+      "not_needed": 0
+    },
+    {
+      "database": "bbs",
+      "table": "common_member_archive",
+      "column_count": 25,
+      "pending_review": 19,
+      "migrated_direct": 0,
+      "migrated_adapted": 6,
+      "logic_only": 0,
+      "not_needed": 0
+    },
+    {
+      "database": "bbs",
+      "table": "common_nav",
+      "column_count": 19,
+      "pending_review": 19,
+      "migrated_direct": 0,
+      "migrated_adapted": 0,
+      "logic_only": 0,
+      "not_needed": 0
+    },
+    {
+      "database": "bbs",
+      "table": "common_block_item",
+      "column_count": 18,
+      "pending_review": 18,
+      "migrated_direct": 0,
+      "migrated_adapted": 0,
+      "logic_only": 0,
+      "not_needed": 0
+    }
+  ],
+  "fully_reviewed_tables": 17,
+  "tables_with_pending_fields": 360,
+  "priority_pending_tables": [
+    {
+      "database": "bbs",
+      "table": "sinofsx_virtualairline_company",
+      "pending_fields": 11,
+      "reason": "Required custom feature: virtual-airline company records have no Discourse importer mapping yet; user asked to preserve this capability."
+    },
+    {
+      "database": "bbs",
+      "table": "sinofsx_virtualairline_nonaccept",
+      "pending_fields": 4,
+      "reason": "Required custom feature: virtual-airline exclusion/acceptance records have no Discourse importer mapping yet; user asked to preserve this capability."
+    },
+    {
+      "database": "bbs",
+      "table": "forum_activity",
+      "pending_fields": 14,
+      "reason": "Activity-topic metadata (schedule, place, capacity, fee, eligibility) is not mapped; confirm live usage and decide which event fields must be preserved."
+    },
+    {
+      "database": "bbs",
+      "table": "forum_activityapply",
+      "pending_fields": 9,
+      "reason": "Activity registration records and applicant fields are not mapped; confirm live usage and whether historical registrations must be retained."
+    },
+    {
+      "database": "bbs",
+      "table": "forum_thread",
+      "pending_fields": 36,
+      "reason": "Only topic identity, category, title, display order, poll discriminator, and attachment topic price are mapped; remaining thread state, counters, options, and special types need review."
+    },
+    {
+      "database": "bbs",
+      "table": "forum_post",
+      "pending_fields": 21,
+      "reason": "Only post identity, topic, author, body, timestamp, signature/anonymity, visibility, and first-post state are mapped; remaining post metadata and edit history need review."
+    },
+    {
+      "database": "bbs",
+      "table": "forum_forumfield",
+      "pending_fields": 36,
+      "reason": "Only description, rules, icon, name color, and coarse permission signals are handled; remaining forum settings and permission semantics need review."
+    },
+    {
+      "database": "bbs",
+      "table": "forum_access",
+      "pending_fields": 9,
+      "reason": "Importer only detects that per-user overrides exist; it does not map the individual UID/forum permission rows."
+    },
+    {
+      "database": "bbs",
+      "table": "common_member_count",
+      "pending_fields": 18,
+      "reason": "Virtual-credit fields are mapped for users in the importer reference UID set; verify whether balances for every account, including archived-only accounts, are covered."
+    },
+    {
+      "database": "bbs",
+      "table": "common_member_count_archive",
+      "pending_fields": 27,
+      "reason": "Archived count fields are not used by the current sell-balance importer; confirm whether archived-only balances contain value that must be preserved."
+    },
+    {
+      "database": "bbs",
+      "table": "common_member_profile",
+      "pending_fields": 40,
+      "reason": "Only a selected set of identity/profile fields is mapped; remaining profile fields and privacy/verification behavior need review."
+    },
+    {
+      "database": "bbs",
+      "table": "common_member_profile_archive",
+      "pending_fields": 38,
+      "reason": "Only a selected set of archived profile fields is used as fallback; all other archived profile data remains undecided."
+    },
+    {
+      "database": "bbs",
+      "table": "forum_post_history",
+      "pending_fields": 5,
+      "reason": "Post edit history is not imported; decide whether historical revisions are required in addition to the current and recoverable deleted content."
+    },
+    {
+      "database": "bbs",
+      "table": "portal_article_title",
+      "pending_fields": 37,
+      "reason": "Discuz Portal article content has no importer path yet; decide whether this site uses Portal content that must move."
+    },
+    {
+      "database": "bbs",
+      "table": "portal_article_content",
+      "pending_fields": 8,
+      "reason": "Discuz Portal article bodies have no importer path yet; decide whether this site uses Portal content that must move."
+    },
+    {
+      "database": "bbs",
+      "table": "forum_trade",
+      "pending_fields": 30,
+      "reason": "Discuz marketplace listings are not mapped; assess whether any active or historical trade records need preservation."
+    },
+    {
+      "database": "bbs",
+      "table": "forum_tradelog",
+      "pending_fields": 36,
+      "reason": "Discuz marketplace transactions can contain buyer/seller and payment history; no migration or explicit omission decision is recorded."
+    },
+    {
+      "database": "bbs",
+      "table": "jzsjiale_sms_user",
+      "pending_fields": 5,
+      "reason": "SMS account-to-phone bindings are not migrated; the user allowed dropping SMS login for now but postponed the detailed identity/data decision."
+    },
+    {
+      "database": "bbs",
+      "table": "common_member_connect",
+      "pending_fields": 11,
+      "reason": "Third-party account bindings such as QQ are not migrated; login capability may be dropped, but the detailed binding/data decision remains open."
+    },
+    {
+      "database": "bbs",
+      "table": "common_grouppm",
+      "pending_fields": 6,
+      "reason": "Group-message data is not included in the current private-message importer; decide whether it represents user messages that must be preserved."
+    },
+    {
+      "database": "bbs",
+      "table": "common_member_grouppm",
+      "pending_fields": 4,
+      "reason": "Per-user group-message state is not included in the current private-message importer; decide whether any of it must be preserved."
+    },
+    {
+      "database": "extend_flydata",
+      "table": "common_cert",
+      "pending_fields": 4,
+      "reason": "Custom callsign/certificate records have no Discourse importer mapping yet. The password field metadata and values were excluded from the approved snapshot; its migration/security decision remains open."
+    },
+    {
+      "database": "extend_flydata",
+      "table": "common_userinfo",
+      "pending_fields": 15,
+      "reason": "Virtual-airline member, callsign, company, and activity data are not imported yet; the user requires the virtual-airline capability to be preserved."
+    },
+    {
+      "database": "extend_flydata",
+      "table": "customprefix",
+      "pending_fields": 4,
+      "reason": "Virtual-airline callsign-prefix configuration has no Discourse mapping yet; required for preserving customized callsigns."
+    },
+    {
+      "database": "extend_flydata",
+      "table": "echo_stat",
+      "pending_fields": 4,
+      "reason": "Aggregated plugin statistics have no migration path; decide whether to recompute them from migrated records or preserve a snapshot."
+    },
+    {
+      "database": "extend_flydata",
+      "table": "exam_pilotkeys",
+      "pending_fields": 7,
+      "reason": "Custom exam question bank has no Discourse mapping yet; the user requested porting the current exam capability."
+    },
+    {
+      "database": "extend_flydata",
+      "table": "exam_pilotresult",
+      "pending_fields": 6,
+      "reason": "Per-user exam results and progress have no Discourse mapping yet; determine which state/history the exam plugin must retain."
+    },
+    {
+      "database": "extend_flydata",
+      "table": "imp_aip_content",
+      "pending_fields": 7,
+      "reason": "Custom AIP content and hierarchy have no Discourse importer mapping; decide whether these documents are in migration scope."
+    },
+    {
+      "database": "extend_flydata",
+      "table": "imp_aip_version",
+      "pending_fields": 4,
+      "reason": "Custom AIP version/effective-date metadata has no Discourse importer mapping; preserve if the related AIP content is retained."
+    },
+    {
+      "database": "extend_flydata",
+      "table": "imp_anniversary",
+      "pending_fields": 11,
+      "reason": "Anniversary event registrations contain participant/contact fields and have no import path; decide whether historical registrations must move."
+    },
+    {
+      "database": "extend_flydata",
+      "table": "imp_anniversary_10th",
+      "pending_fields": 11,
+      "reason": "10th-anniversary event registrations have no import path; decide whether this historical event data must move."
+    },
+    {
+      "database": "extend_flydata",
+      "table": "imp_anniversary_schedule",
+      "pending_fields": 5,
+      "reason": "Anniversary schedule/attendance records have no import path; decide whether historical attendance must move."
+    },
+    {
+      "database": "extend_flydata",
+      "table": "imp_anniversary_schedule_10th",
+      "pending_fields": 5,
+      "reason": "10th-anniversary schedule/attendance records have no import path; decide whether historical attendance must move."
+    },
+    {
+      "database": "extend_flydata",
+      "table": "imp_ban",
+      "pending_fields": 8,
+      "reason": "Custom plugin ban records have no Discourse moderation mapping; define equivalence and retention before classifying as unnecessary."
+    },
+    {
+      "database": "extend_flydata",
+      "table": "imp_dispatch",
+      "pending_fields": 8,
+      "reason": "Virtual-airline dispatch assignments have no Discourse importer mapping yet; preserve if dispatch operations are in scope."
+    },
+    {
+      "database": "extend_flydata",
+      "table": "imp_dispatch_route",
+      "pending_fields": 7,
+      "reason": "Virtual-airline dispatch routes have no Discourse importer mapping yet; preserve if dispatch operations are in scope."
+    },
+    {
+      "database": "extend_flydata",
+      "table": "imp_dispatch_schedule",
+      "pending_fields": 7,
+      "reason": "Virtual-airline dispatch schedules have no Discourse importer mapping yet; preserve if dispatch operations are in scope."
+    },
+    {
+      "database": "extend_flydata",
+      "table": "imp_examine",
+      "pending_fields": 9,
+      "reason": "Custom controller/pilot examination records have no Discourse importer mapping yet; determine required history for the ported exam capability."
+    },
+    {
+      "database": "extend_flydata",
+      "table": "imp_log",
+      "pending_fields": 5,
+      "reason": "Custom plugin operation logs are not imported; retention, audit, and privacy requirements have not been decided."
+    },
+    {
+      "database": "extend_flydata",
+      "table": "imp_news",
+      "pending_fields": 8,
+      "reason": "Custom plugin news content has no Discourse mapping yet; decide whether it should become categories/topics or be archived elsewhere."
+    },
+    {
+      "database": "extend_flydata",
+      "table": "imp_news_read",
+      "pending_fields": 4,
+      "reason": "Per-user plugin news read state has no Discourse mapping; decide whether this state is needed after news migration."
+    },
+    {
+      "database": "extend_flydata",
+      "table": "imp_recruit",
+      "pending_fields": 16,
+      "reason": "Virtual-airline recruitment campaigns have no Discourse importer mapping yet; preserve if recruitment workflows are in scope."
+    },
+    {
+      "database": "extend_flydata",
+      "table": "imp_recruit_condition",
+      "pending_fields": 6,
+      "reason": "Recruitment eligibility conditions have no Discourse importer mapping yet; preserve with the associated campaign if required."
+    },
+    {
+      "database": "extend_flydata",
+      "table": "imp_recruit_seat",
+      "pending_fields": 11,
+      "reason": "Recruitment position/seat requirements have no Discourse importer mapping yet; preserve with the associated campaign if required."
+    },
+    {
+      "database": "extend_flydata",
+      "table": "imp_training",
+      "pending_fields": 10,
+      "reason": "Custom virtual-airline training records have no Discourse importer mapping yet; decide which history and comments must be retained."
+    },
+    {
+      "database": "extend_flydata",
+      "table": "memberprefixlog",
+      "pending_fields": 5,
+      "reason": "Historical callsign-prefix changes are not imported; decide whether this audit history is required by the virtual-airline feature."
+    }
+  ]
+}

@@ -1,0 +1,470 @@
+version: 1
+default:
+  disposition: pending_review
+  reason: >-
+    No explicit field-level migration mapping or approved omission decision is recorded.
+    Treat as an open audit item; do not infer that Discourse does not need it.
+
+tables:
+  bbs.common_member:
+    fields:
+      uid:
+        disposition: migrated_adapted
+        target: "User import identity: UserCustomField import_id, discuz_uid"
+        reason: "Discuz UID becomes the stable source identity; Discourse assigns its own primary key."
+        evidence: "script/import_scripts/discuz_x.rb#source_member_union, #create_user"
+      username:
+        disposition: migrated_adapted
+        target: "User.username"
+        reason: "Imported with Unicode enabled; Discourse uniqueness and validation still apply."
+        evidence: "script/import_scripts/discuz_x.rb#import_users"
+      email:
+        disposition: migrated_adapted
+        target: "User email address"
+        reason: "Preserved unless duplicate or conflicting; those addresses are reserved and original value is retained in a custom field."
+        evidence: "script/import_scripts/discuz_x.rb#import_users, #get_duplicate_email_uids"
+      groupid:
+        disposition: migrated_adapted
+        target: "User.admin, User.moderator; UserCustomField discuz_group_id for paid-content group checks"
+        reason: "Administrator/moderator roles are mapped; other group behavior is not reproduced."
+        evidence: "script/import_scripts/discuz_x.rb#get_knowledge_about_group, #import_users, #import_discuz_sell_financials!"
+        remaining_gap: "Complete Discuz user-group permission and membership behavior is not mapped."
+      emailstatus:
+        disposition: migrated_adapted
+        target: "User activation and email-confirmed state"
+        reason: "A verified source email activates the imported account only when the address remains unique and unchanged."
+        evidence: "script/import_scripts/discuz_x.rb#create_user, #activate_discuz_user_from_verified_email!"
+      avatarstatus:
+        disposition: migrated_adapted
+        target: "UserCustomField discuz_avatarstatus; Discuz avatar rendering adapter"
+        reason: "Controls whether the renderer uses the original Discuz avatar URL or the Discourse default avatar."
+        evidence: "script/import_scripts/discuz_x.rb#import_users; plugins/discourse-discuz-legacy-auth/lib/discourse_discuz_legacy_auth/user_avatar_extension.rb"
+  bbs.common_member_archive:
+    fields:
+      uid:
+        disposition: migrated_adapted
+        target: "User import identity: UserCustomField import_id, discuz_uid"
+        reason: "Used as a fallback source row only when the active member table has no matching UID."
+        evidence: "script/import_scripts/discuz_x.rb#source_member_union, #create_user"
+      username:
+        disposition: migrated_adapted
+        target: "User.username"
+        reason: "Imported with Unicode enabled; Discourse uniqueness and validation still apply."
+        evidence: "script/import_scripts/discuz_x.rb#source_member_union, #import_users"
+      email:
+        disposition: migrated_adapted
+        target: "User email address"
+        reason: "Imported as a fallback member row, subject to duplicate/conflict reservation."
+        evidence: "script/import_scripts/discuz_x.rb#source_member_union, #import_users"
+      groupid:
+        disposition: migrated_adapted
+        target: "User.admin, User.moderator; UserCustomField discuz_group_id for paid-content group checks"
+        reason: "Administrator/moderator roles are mapped; other group behavior is not reproduced."
+        evidence: "script/import_scripts/discuz_x.rb#source_member_union, #get_knowledge_about_group"
+        remaining_gap: "Complete Discuz user-group permission and membership behavior is not mapped."
+      emailstatus:
+        disposition: migrated_adapted
+        target: "User activation and email-confirmed state"
+        reason: "A verified source email activates the imported account only when the address remains unique and unchanged."
+        evidence: "script/import_scripts/discuz_x.rb#source_member_union, #activate_discuz_user_from_verified_email!"
+      avatarstatus:
+        disposition: migrated_adapted
+        target: "UserCustomField discuz_avatarstatus; Discuz avatar rendering adapter"
+        reason: "Controls whether the renderer uses the original Discuz avatar URL or the Discourse default avatar."
+        evidence: "script/import_scripts/discuz_x.rb#source_member_union; plugins/discourse-discuz-legacy-auth/lib/discourse_discuz_legacy_auth/user_avatar_extension.rb"
+  bbs.common_member_profile:
+    fields:
+      uid: {disposition: logic_only, target: "Join key", reason: "Joins profile data to the source member UID.", evidence: "script/import_scripts/discuz_x.rb#import_users"}
+      site: {disposition: migrated_adapted, target: "UserProfile.website", reason: "Copied when it looks like a URL; otherwise QQ fallback logic may apply.", evidence: "script/import_scripts/discuz_x.rb#import_users"}
+      address: {disposition: migrated_adapted, target: "UserProfile.location", reason: "Preferred as the location value.", evidence: "script/import_scripts/discuz_x.rb#import_users"}
+      bio: {disposition: migrated_adapted, target: "UserProfile.bio_raw", reason: "HTML entities are decoded and the value is truncated to the Discourse bio limit.", evidence: "script/import_scripts/discuz_x.rb#import_users"}
+      realname: {disposition: migrated_adapted, target: "User.name", reason: "Used as the first choice for the display name.", evidence: "script/import_scripts/discuz_x.rb#import_users"}
+      qq: {disposition: migrated_adapted, target: "UserProfile.website fallback", reason: "A numeric QQ number may become a Qzone URL when no usable website is present.", evidence: "script/import_scripts/discuz_x.rb#import_users"}
+      resideprovince: {disposition: migrated_adapted, target: "UserProfile.location", reason: "Residence components are joined when address is absent.", evidence: "script/import_scripts/discuz_x.rb#import_users"}
+      residecity: {disposition: migrated_adapted, target: "UserProfile.location", reason: "Residence components are joined when address is absent.", evidence: "script/import_scripts/discuz_x.rb#import_users"}
+      residedist: {disposition: migrated_adapted, target: "UserProfile.location", reason: "Residence components are joined when address is absent.", evidence: "script/import_scripts/discuz_x.rb#import_users"}
+      residecommunity: {disposition: migrated_adapted, target: "UserProfile.location", reason: "Residence components are joined when address is absent.", evidence: "script/import_scripts/discuz_x.rb#import_users"}
+      birthprovince: {disposition: migrated_adapted, target: "UserProfile.location fallback", reason: "Birthplace components are joined only when residence province is absent and address is absent.", evidence: "script/import_scripts/discuz_x.rb#import_users"}
+      birthcity: {disposition: migrated_adapted, target: "UserProfile.location fallback", reason: "Birthplace components are joined only when residence province is absent and address is absent.", evidence: "script/import_scripts/discuz_x.rb#import_users"}
+      birthdist: {disposition: migrated_adapted, target: "UserProfile.location fallback", reason: "Birthplace components are joined only when residence province is absent and address is absent.", evidence: "script/import_scripts/discuz_x.rb#import_users"}
+      birthcommunity: {disposition: migrated_adapted, target: "UserProfile.location fallback", reason: "Birthplace components are joined only when residence province is absent and address is absent.", evidence: "script/import_scripts/discuz_x.rb#import_users"}
+  bbs.common_member_profile_archive:
+    fields:
+      uid: {disposition: logic_only, target: "Join key", reason: "Joins archived profile data to the source member UID when active profile values are absent.", evidence: "script/import_scripts/discuz_x.rb#import_users"}
+      site: {disposition: migrated_adapted, target: "UserProfile.website", reason: "Fallback value when the active profile value is absent.", evidence: "script/import_scripts/discuz_x.rb#import_users"}
+      address: {disposition: migrated_adapted, target: "UserProfile.location", reason: "Fallback value when the active profile value is absent.", evidence: "script/import_scripts/discuz_x.rb#import_users"}
+      bio: {disposition: migrated_adapted, target: "UserProfile.bio_raw", reason: "Fallback value; HTML entities are decoded and the value is truncated.", evidence: "script/import_scripts/discuz_x.rb#import_users"}
+      realname: {disposition: migrated_adapted, target: "User.name", reason: "Fallback value for the display name.", evidence: "script/import_scripts/discuz_x.rb#import_users"}
+      qq: {disposition: migrated_adapted, target: "UserProfile.website fallback", reason: "Fallback QQ number may become a Qzone URL.", evidence: "script/import_scripts/discuz_x.rb#import_users"}
+      resideprovince: {disposition: migrated_adapted, target: "UserProfile.location", reason: "Residence components are joined when active values are absent.", evidence: "script/import_scripts/discuz_x.rb#import_users"}
+      residecity: {disposition: migrated_adapted, target: "UserProfile.location", reason: "Residence components are joined when active values are absent.", evidence: "script/import_scripts/discuz_x.rb#import_users"}
+      residedist: {disposition: migrated_adapted, target: "UserProfile.location", reason: "Residence components are joined when active values are absent.", evidence: "script/import_scripts/discuz_x.rb#import_users"}
+      residecommunity: {disposition: migrated_adapted, target: "UserProfile.location", reason: "Residence components are joined when active values are absent.", evidence: "script/import_scripts/discuz_x.rb#import_users"}
+      birthprovince: {disposition: migrated_adapted, target: "UserProfile.location fallback", reason: "Birthplace components are joined when active and residence values are absent.", evidence: "script/import_scripts/discuz_x.rb#import_users"}
+      birthcity: {disposition: migrated_adapted, target: "UserProfile.location fallback", reason: "Birthplace components are joined when active and residence values are absent.", evidence: "script/import_scripts/discuz_x.rb#import_users"}
+      birthdist: {disposition: migrated_adapted, target: "UserProfile.location fallback", reason: "Birthplace components are joined when active and residence values are absent.", evidence: "script/import_scripts/discuz_x.rb#import_users"}
+      birthcommunity: {disposition: migrated_adapted, target: "UserProfile.location fallback", reason: "Birthplace components are joined when active and residence values are absent.", evidence: "script/import_scripts/discuz_x.rb#import_users"}
+  bbs.common_member_status:
+    fields:
+      uid: {disposition: logic_only, target: "Join key", reason: "Joins status data to the source member UID.", evidence: "script/import_scripts/discuz_x.rb#import_users"}
+      regip: {disposition: migrated_direct, target: "User.registration_ip_address", reason: "Copied as the registration IP.", evidence: "script/import_scripts/discuz_x.rb#import_users"}
+      lastip: {disposition: migrated_direct, target: "User.ip_address", reason: "Copied as the last visit IP.", evidence: "script/import_scripts/discuz_x.rb#import_users"}
+      lastvisit: {disposition: migrated_adapted, target: "User.last_seen_at", reason: "Unix timestamp converted to a Discourse time value.", evidence: "script/import_scripts/discuz_x.rb#import_users, #discuz_timestamp"}
+      lastpost: {disposition: migrated_adapted, target: "User.last_posted_at", reason: "Unix timestamp converted to a Discourse time value.", evidence: "script/import_scripts/discuz_x.rb#import_users, #discuz_timestamp"}
+      lastsendmail: {disposition: migrated_adapted, target: "User.last_emailed_at", reason: "Unix timestamp converted to a Discourse time value.", evidence: "script/import_scripts/discuz_x.rb#import_users, #discuz_timestamp"}
+  bbs.common_member_status_archive:
+    fields:
+      uid: {disposition: logic_only, target: "Join key", reason: "Joins archived status data when active status values are absent.", evidence: "script/import_scripts/discuz_x.rb#import_users"}
+      regip: {disposition: migrated_direct, target: "User.registration_ip_address", reason: "Fallback source for registration IP.", evidence: "script/import_scripts/discuz_x.rb#import_users"}
+      lastip: {disposition: migrated_direct, target: "User.ip_address", reason: "Fallback source for last visit IP.", evidence: "script/import_scripts/discuz_x.rb#import_users"}
+      lastvisit: {disposition: migrated_adapted, target: "User.last_seen_at", reason: "Fallback Unix timestamp converted to Discourse time.", evidence: "script/import_scripts/discuz_x.rb#import_users, #discuz_timestamp"}
+      lastpost: {disposition: migrated_adapted, target: "User.last_posted_at", reason: "Fallback Unix timestamp converted to Discourse time.", evidence: "script/import_scripts/discuz_x.rb#import_users, #discuz_timestamp"}
+      lastsendmail: {disposition: migrated_adapted, target: "User.last_emailed_at", reason: "Fallback Unix timestamp converted to Discourse time.", evidence: "script/import_scripts/discuz_x.rb#import_users, #discuz_timestamp"}
+  bbs.common_member_field_forum:
+    fields:
+      uid: {disposition: logic_only, target: "Join key", reason: "Joins profile forum fields to the source member UID.", evidence: "script/import_scripts/discuz_x.rb#import_users, #import_discuz_medals"}
+      customstatus: {disposition: migrated_adapted, target: "User.name fallback", reason: "Used when realname is absent; it is not retained as a separate title.", evidence: "script/import_scripts/discuz_x.rb#import_users"}
+      sightml: {disposition: migrated_adapted, target: "UserCustomField discuz_signature_html and rendered post signature", reason: "Discuz signature markup is cooked for profile display and rendered beneath eligible imported posts.", evidence: "script/import_scripts/discuz_x.rb#import_users; plugins/discourse-discuz-legacy-auth"}
+      medals: {disposition: migrated_adapted, target: "Discourse badges and Discuz medal grant records", reason: "Membership tokens are parsed and reconciled with available medal definitions.", evidence: "script/import_scripts/discuz_x.rb#import_discuz_medals; tools/discuz_migration/medals.rb"}
+  bbs.common_member_field_forum_archive:
+    fields:
+      uid: {disposition: logic_only, target: "Join key", reason: "Joins archived profile forum fields to the source member UID.", evidence: "script/import_scripts/discuz_x.rb#import_users"}
+      customstatus: {disposition: migrated_adapted, target: "User.name fallback", reason: "Used when active realname and customstatus values are absent.", evidence: "script/import_scripts/discuz_x.rb#import_users"}
+      sightml: {disposition: migrated_adapted, target: "UserCustomField discuz_signature_html and rendered post signature", reason: "Fallback Discuz signature markup is cooked for profile display and post rendering.", evidence: "script/import_scripts/discuz_x.rb#import_users; plugins/discourse-discuz-legacy-auth"}
+      medals: {disposition: pending_review, target: "", reason: "The medal stage reads medals from common_member_field_forum only; archived-only membership fallback is not implemented or decided.", evidence: "script/import_scripts/discuz_x.rb#import_discuz_medals"}
+  bbs.common_member_field_home:
+    fields:
+      uid: {disposition: logic_only, target: "Join key", reason: "Joins home profile fields to the source member UID.", evidence: "script/import_scripts/discuz_x.rb#import_users"}
+      spacecss: {disposition: migrated_adapted, target: "UserProfile profile/card background uploads", reason: "Recognized CSS background URLs are extracted and copied only when the local asset snapshot is enabled; metadata-only imports defer the assets.", evidence: "script/import_scripts/discuz_x.rb#import_users"}
+      spacenote: {disposition: migrated_adapted, target: "UserProfile.bio_raw fallback", reason: "Used only when bio and signature are absent.", evidence: "script/import_scripts/discuz_x.rb#import_users"}
+  bbs.common_member_field_home_archive:
+    fields:
+      uid: {disposition: logic_only, target: "Join key", reason: "Joins archived home profile fields to the source member UID.", evidence: "script/import_scripts/discuz_x.rb#import_users"}
+      spacecss: {disposition: migrated_adapted, target: "UserProfile profile/card background uploads", reason: "Fallback CSS background URLs are extracted and copied only when the local asset snapshot is enabled.", evidence: "script/import_scripts/discuz_x.rb#import_users"}
+      spacenote: {disposition: migrated_adapted, target: "UserProfile.bio_raw fallback", reason: "Fallback value when bio and active space note are absent.", evidence: "script/import_scripts/discuz_x.rb#import_users"}
+  bbs.common_member_count:
+    fields:
+      uid: {disposition: logic_only, target: "Join key", reason: "Joins virtual credit balances to the source UID.", evidence: "script/import_scripts/discuz_x.rb#import_discuz_sell_financials!"}
+      extcredits1: {disposition: migrated_adapted, target: "discourse_discuz_bbcode.discuz_sell_credit_balances", reason: "Balance is imported with source credit ID 1 when dc_sell is configured.", evidence: "script/import_scripts/discuz_x.rb#import_discuz_sell_financials!"}
+      extcredits2: {disposition: migrated_adapted, target: "discourse_discuz_bbcode.discuz_sell_credit_balances", reason: "Balance is imported with source credit ID 2 when dc_sell is configured.", evidence: "script/import_scripts/discuz_x.rb#import_discuz_sell_financials!"}
+      extcredits3: {disposition: migrated_adapted, target: "discourse_discuz_bbcode.discuz_sell_credit_balances", reason: "Balance is imported with source credit ID 3 when dc_sell is configured.", evidence: "script/import_scripts/discuz_x.rb#import_discuz_sell_financials!"}
+      extcredits4: {disposition: migrated_adapted, target: "discourse_discuz_bbcode.discuz_sell_credit_balances", reason: "Balance is imported with source credit ID 4 when dc_sell is configured.", evidence: "script/import_scripts/discuz_x.rb#import_discuz_sell_financials!"}
+      extcredits5: {disposition: migrated_adapted, target: "discourse_discuz_bbcode.discuz_sell_credit_balances", reason: "Balance is imported with source credit ID 5 when dc_sell is configured.", evidence: "script/import_scripts/discuz_x.rb#import_discuz_sell_financials!"}
+      extcredits6: {disposition: migrated_adapted, target: "discourse_discuz_bbcode.discuz_sell_credit_balances", reason: "Balance is imported with source credit ID 6 when dc_sell is configured.", evidence: "script/import_scripts/discuz_x.rb#import_discuz_sell_financials!"}
+      extcredits7: {disposition: migrated_adapted, target: "discourse_discuz_bbcode.discuz_sell_credit_balances", reason: "Balance is imported with source credit ID 7 when dc_sell is configured.", evidence: "script/import_scripts/discuz_x.rb#import_discuz_sell_financials!"}
+      extcredits8: {disposition: migrated_adapted, target: "discourse_discuz_bbcode.discuz_sell_credit_balances", reason: "Balance is imported with source credit ID 8 when dc_sell is configured.", evidence: "script/import_scripts/discuz_x.rb#import_discuz_sell_financials!"}
+  bbs.common_member_count_archive:
+    fields:
+      extcredits1: {disposition: pending_review, target: "", reason: "The sell-balance import reads common_member_count but has no archived-count fallback; archived-only user balances need review.", evidence: "script/import_scripts/discuz_x.rb#import_discuz_sell_financials!"}
+      extcredits2: {disposition: pending_review, target: "", reason: "The sell-balance import reads common_member_count but has no archived-count fallback; archived-only user balances need review.", evidence: "script/import_scripts/discuz_x.rb#import_discuz_sell_financials!"}
+      extcredits3: {disposition: pending_review, target: "", reason: "The sell-balance import reads common_member_count but has no archived-count fallback; archived-only user balances need review.", evidence: "script/import_scripts/discuz_x.rb#import_discuz_sell_financials!"}
+      extcredits4: {disposition: pending_review, target: "", reason: "The sell-balance import reads common_member_count but has no archived-count fallback; archived-only user balances need review.", evidence: "script/import_scripts/discuz_x.rb#import_discuz_sell_financials!"}
+      extcredits5: {disposition: pending_review, target: "", reason: "The sell-balance import reads common_member_count but has no archived-count fallback; archived-only user balances need review.", evidence: "script/import_scripts/discuz_x.rb#import_discuz_sell_financials!"}
+      extcredits6: {disposition: pending_review, target: "", reason: "The sell-balance import reads common_member_count but has no archived-count fallback; archived-only user balances need review.", evidence: "script/import_scripts/discuz_x.rb#import_discuz_sell_financials!"}
+      extcredits7: {disposition: pending_review, target: "", reason: "The sell-balance import reads common_member_count but has no archived-count fallback; archived-only user balances need review.", evidence: "script/import_scripts/discuz_x.rb#import_discuz_sell_financials!"}
+      extcredits8: {disposition: pending_review, target: "", reason: "The sell-balance import reads common_member_count but has no archived-count fallback; archived-only user balances need review.", evidence: "script/import_scripts/discuz_x.rb#import_discuz_sell_financials!"}
+  bbs.common_usergroup:
+    fields:
+      groupid: {disposition: logic_only, target: "Discuz role lookup", reason: "Group IDs are looked up to identify administrators and moderators.", evidence: "script/import_scripts/discuz_x.rb#get_knowledge_about_group"}
+      radminid: {disposition: migrated_adapted, target: "User.admin / User.moderator", reason: "Discuz role code 1 maps to admin; codes 2 and 3 map to moderator.", evidence: "script/import_scripts/discuz_x.rb#get_knowledge_about_group, #import_users"}
+  bbs.common_setting:
+    fields:
+      skey:
+        disposition: logic_only
+        target: "Setting selector"
+        reason: "Only rows with skey forumkeys or extcredits are read by the importer."
+        evidence: "script/import_scripts/discuz_x.rb#get_knowledge_about_category_slug, #source_discuz_credit_types"
+      svalue:
+        disposition: migrated_adapted
+        target: "Category.slug and paid-content credit title/unit settings"
+        reason: "Selected settings are PHP-unserialized and mapped to Discourse category slugs or paid-content labels."
+        evidence: "script/import_scripts/discuz_x.rb#get_knowledge_about_category_slug, #source_discuz_credit_types"
+        remaining_gap: "Only the forumkeys and extcredits settings are interpreted; other settings remain unreviewed."
+  bbs.common_plugin:
+    fields:
+      pluginid: {disposition: logic_only, target: "Plugin-variable join key", reason: "Joins dc_sell plugin configuration to its variables.", evidence: "script/import_scripts/discuz_x.rb#import_discuz_sell_settings!"}
+      identifier: {disposition: logic_only, target: "dc_sell settings selector", reason: "Only the dc_sell plugin settings are imported.", evidence: "script/import_scripts/discuz_x.rb#import_discuz_sell_settings!"}
+  bbs.common_pluginvar:
+    fields:
+      pluginid: {disposition: logic_only, target: "Plugin-variable join key", reason: "Joins variables to the dc_sell plugin row.", evidence: "script/import_scripts/discuz_x.rb#import_discuz_sell_settings!"}
+      variable: {disposition: logic_only, target: "Setting selector", reason: "Selects the dc_sell open/fids/free/maxprice/salestax values.", evidence: "script/import_scripts/discuz_x.rb#import_discuz_sell_settings!"}
+      value: {disposition: migrated_adapted, target: "Discourse sell plugin site settings", reason: "Selected dc_sell values are decoded and validated before populating Discourse settings.", evidence: "script/import_scripts/discuz_x.rb#import_discuz_sell_settings!"}
+  bbs.forum_forum:
+    fields:
+      fid: {disposition: migrated_adapted, target: "CategoryCustomField import_id", reason: "Discuz fid is retained as the source identity; Discourse assigns its own category ID.", evidence: "script/import_scripts/discuz_x.rb#import_categories"}
+      fup: {disposition: migrated_adapted, target: "Category.parent_category_id", reason: "Parent fid is translated through imported category IDs, with hierarchy capped at three levels.", evidence: "tools/discuz_migration/category_eligibility.rb#effective_parent_ids"}
+      name: {disposition: migrated_adapted, target: "Category.name", reason: "Name is trimmed and collision suffixes are added where needed.", evidence: "tools/discuz_migration/category_eligibility.rb#display_names"}
+      type: {disposition: not_needed, target: "No separate Discourse field", reason: "The user decided the remaining type=group records should be imported as ordinary boards; source forum type is therefore not retained as a category subtype.", evidence: "script/import_scripts/discuz_x.rb#import_categories; DiscuzCategoryEligibility"}
+      status: {disposition: logic_only, target: "Import eligibility and muted-category setting", reason: "Only Discuz status 0 and 1 are imported; status 0 categories are muted and other statuses are excluded.", evidence: "tools/discuz_migration/category_eligibility.rb#importable?; script/import_scripts/discuz_x.rb#import_categories"}
+      displayorder: {disposition: migrated_adapted, target: "Category.position", reason: "Source display order is offset after existing positions to avoid collisions.", evidence: "script/import_scripts/discuz_x.rb#import_categories"}
+  bbs.forum_forumfield:
+    fields:
+      fid: {disposition: logic_only, target: "Join key", reason: "Joins extended forum metadata to forum_forum.fid.", evidence: "script/import_scripts/discuz_x.rb#import_categories"}
+      description: {disposition: migrated_adapted, target: "Category.description", reason: "Discuz markup is converted to Discourse-compatible category description text.", evidence: "script/import_scripts/discuz_x.rb#process_discuz_category_text"}
+      rules: {disposition: migrated_adapted, target: "CategoryCustomField discuz_rules and category rules display", reason: "Stored separately and displayed through the Discuz category adapter.", evidence: "script/import_scripts/discuz_x.rb#import_categories; plugins/discourse-discuz-category-rules"}
+      icon: {disposition: migrated_adapted, target: "Category uploaded logo", reason: "Copied only when attachment snapshot import is enabled; metadata-only imports defer icon bytes.", evidence: "script/import_scripts/discuz_x.rb#import_categories"}
+      extra: {disposition: migrated_adapted, target: "Category.color from serialized namecolor", reason: "Only the namecolor value is parsed; other serialized extra values are not interpreted.", evidence: "script/import_scripts/discuz_x.rb#import_categories"}
+      viewperm: {disposition: migrated_adapted, target: "Category permissions and discuz_viewperm_configured", reason: "Converted to public or staff-only visibility fallback; group-specific permissions remain undecided.", evidence: "tools/discuz_migration/category_permissions.rb; script/import_scripts/discuz_x.rb#apply_category_access_fallback"}
+      formulaperm: {disposition: migrated_adapted, target: "Category permissions and discuz_formulaperm_configured", reason: "Parsed conservatively; unsupported or malformed restrictions become staff-only; per-user and medal-based formula permissions are not fully mapped.", evidence: "tools/discuz_migration/category_permissions.rb; script/import_scripts/discuz_x.rb#apply_category_access_fallback"}
+      password: {disposition: migrated_adapted, target: "Category staff-only fallback and discuz_password_protected", reason: "Presence of a source password marks the category restricted; the password itself is not reused.", evidence: "tools/discuz_migration/category_permissions.rb; script/import_scripts/discuz_x.rb#apply_category_access_fallback"}
+      postperm: {disposition: migrated_adapted, target: "Category everyone read-only fallback and discuz_postperm_configured", reason: "Restricted posting is reduced to read-only for everyone and full access for staff; group-specific posting permissions are not mapped.", evidence: "tools/discuz_migration/category_permissions.rb; script/import_scripts/discuz_x.rb#apply_category_access_fallback"}
+      replyperm: {disposition: migrated_adapted, target: "Category everyone read-only fallback and discuz_replyperm_configured", reason: "Restricted replies are reduced to read-only for everyone and full access for staff; group-specific reply permissions are not mapped.", evidence: "tools/discuz_migration/category_permissions.rb; script/import_scripts/discuz_x.rb#apply_category_access_fallback"}
+  bbs.forum_access:
+    fields:
+      fid: {disposition: logic_only, target: "Detect category with user-specific view overrides", reason: "The importer checks whether any allowview override exists for a forum, but does not migrate per-user forum_access rows.", evidence: "script/import_scripts/discuz_x.rb#import_categories"}
+      allowview: {disposition: logic_only, target: "Detect category with user-specific view overrides", reason: "Only nonzero values flag that user-specific visibility exists; the individual rows are not migrated.", evidence: "script/import_scripts/discuz_x.rb#import_categories"}
+  bbs.forum_thread:
+    fields:
+      tid: {disposition: migrated_adapted, target: "Topic and first-post import_id mapping", reason: "Discuz topic identity is retained in import markers; Discourse IDs are assigned separately.", evidence: "script/import_scripts/discuz_x.rb#import_posts"}
+      fid: {disposition: migrated_adapted, target: "Topic.category_id", reason: "Source fid is resolved to an imported Discourse category ID.", evidence: "script/import_scripts/discuz_x.rb#import_posts"}
+      subject: {disposition: migrated_adapted, target: "Topic.title", reason: "HTML entities are decoded before import.", evidence: "script/import_scripts/discuz_x.rb#import_posts"}
+      displayorder: {disposition: migrated_adapted, target: "Topic visibility state and discuz_thread_displayorder custom field", reason: "Negative values cause the imported first post to enter recoverable trash; the value is also retained in a custom field.", evidence: "script/import_scripts/discuz_x.rb#import_posts, #apply_deferred_visibility_actions"}
+      special: {disposition: migrated_adapted, target: "Discourse poll markup for source poll threads", reason: "special=1 reads poll metadata and prepends a Discourse poll; other special thread types are not converted.", evidence: "script/import_scripts/discuz_x.rb#import_posts"}
+      price: {disposition: migrated_adapted, target: "Discuz attachment topic_price metadata", reason: "Used for attachment purchase/access rendering; it is not a complete topic-sale migration.", evidence: "script/import_scripts/discuz_x.rb#import_attachment_metadata"}
+  bbs.forum_post:
+    fields:
+      pid: {disposition: migrated_adapted, target: "Post import_id mapping", reason: "Discuz post ID is retained as an import marker.", evidence: "script/import_scripts/discuz_x.rb#import_posts"}
+      tid: {disposition: migrated_adapted, target: "Post.topic_id", reason: "Resolves a source topic to the imported Discourse topic.", evidence: "script/import_scripts/discuz_x.rb#import_posts"}
+      authorid: {disposition: migrated_adapted, target: "Post.user_id", reason: "Resolved through the Discuz UID mapping; unmapped authors are skipped and reported.", evidence: "script/import_scripts/discuz_x.rb#import_posts"}
+      message: {disposition: migrated_adapted, target: "Post.raw / cooked", reason: "Discuz BBCode, quotes, tables, smileys, attachments, links, and paid sections are parsed or converted by importer/plugins.", evidence: "script/import_scripts/discuz_x.rb#process_discuzx_post; plugins/discourse-discuz-bbcode"}
+      dateline: {disposition: migrated_adapted, target: "Post.created_at", reason: "Unix timestamp is converted to a Discourse time value.", evidence: "script/import_scripts/discuz_x.rb#import_posts"}
+      usesig: {disposition: migrated_adapted, target: "PostCustomField discuz_usesig", reason: "Preserves whether this post requested its author's signature.", evidence: "script/import_scripts/discuz_x.rb#import_posts; plugins/discourse-discuz-legacy-auth"}
+      anonymous: {disposition: migrated_adapted, target: "PostCustomField discuz_anonymous", reason: "Source anonymity flag is retained for compatible rendering.", evidence: "script/import_scripts/discuz_x.rb#import_posts"}
+      invisible: {disposition: migrated_adapted, target: "PostCustomField discuz_invisible and recoverable trash state", reason: "Nonzero source visibility state is preserved by deleting the imported post through Discourse's recoverable trash path.", evidence: "script/import_scripts/discuz_x.rb#import_posts, #apply_deferred_visibility_actions"}
+      first: {disposition: logic_only, target: "Topic first-post/reply structure", reason: "Identifies the first post and orders posts within their topics.", evidence: "script/import_scripts/discuz_x.rb#import_posts"}
+  bbs.forum_poll:
+    fields:
+      tid: {disposition: logic_only, target: "Poll lookup key", reason: "Loads poll options for a source topic.", evidence: "script/import_scripts/discuz_x.rb#import_posts"}
+      multiple: {disposition: migrated_adapted, target: "Discourse poll type", reason: "Multiple-choice source polls become type=multiple.", evidence: "script/import_scripts/discuz_x.rb#import_posts"}
+      maxchoices: {disposition: migrated_adapted, target: "Discourse poll max option count", reason: "A positive source value is emitted as the Discourse poll max setting.", evidence: "script/import_scripts/discuz_x.rb#import_posts"}
+  bbs.forum_polloption:
+    fields:
+      tid: {disposition: logic_only, target: "Poll lookup key", reason: "Associates options with a source topic.", evidence: "script/import_scripts/discuz_x.rb#import_posts"}
+      polloption: {disposition: migrated_adapted, target: "Discourse poll option", reason: "Inserted as a bullet option inside converted poll markup.", evidence: "script/import_scripts/discuz_x.rb#import_posts"}
+      displayorder: {disposition: logic_only, target: "Poll option ordering", reason: "Orders source options before generating Discourse poll markup.", evidence: "script/import_scripts/discuz_x.rb#import_posts"}
+  bbs.home_favorite:
+    fields:
+      idtype: {disposition: logic_only, target: "Favorite type filter", reason: "Only idtype=tid favorites are selected; favorites of other Discuz object types are not imported.", evidence: "script/import_scripts/discuz_x.rb#import_bookmarks"}
+      uid: {disposition: migrated_direct, target: "Bookmark.user_id", reason: "Source UID resolves to the imported user.", evidence: "script/import_scripts/discuz_x.rb#import_bookmarks"}
+      id: {disposition: migrated_adapted, target: "Bookmark.post_id", reason: "Source thread ID is resolved to that thread's first post.", evidence: "script/import_scripts/discuz_x.rb#import_bookmarks"}
+  bbs.forum_attachment:
+    fields:
+      aid: {disposition: migrated_adapted, target: "discourse_discuz_bbcode.discuz_attachments.aid", reason: "Retains the source attachment identity.", evidence: "script/import_scripts/discuz_x.rb#import_attachment_metadata"}
+      tableid: {disposition: logic_only, target: "Partition table selector", reason: "Selects the forum_attachment_N metadata shard containing the attachment row.", evidence: "script/import_scripts/discuz_x.rb#import_attachment_metadata"}
+      pid: {disposition: migrated_adapted, target: "Discuz attachment metadata post_id", reason: "Maps source post ID to the imported Discourse post.", evidence: "script/import_scripts/discuz_x.rb#import_attachment_metadata"}
+  bbs.forum_medal:
+    fields:
+      medalid: {disposition: migrated_adapted, target: "DiscourseDiscuzMedals::MedalMapping.discuz_medalid and badge", reason: "Source medal identity maps to a Discourse badge identity.", evidence: "script/import_scripts/discuz_x.rb#import_discuz_medals"}
+      name: {disposition: migrated_adapted, target: "Discourse Badge.name and MedalMapping.source_name", reason: "Source name is retained in the mapping and adapted to a unique badge name.", evidence: "script/import_scripts/discuz_x.rb#sync_discuz_medal_definition!"}
+      description: {disposition: migrated_adapted, target: "Discourse Badge.description and MedalMapping.source_description", reason: "Description is retained with the target badge length limit applied.", evidence: "script/import_scripts/discuz_x.rb#sync_discuz_medal_definition!"}
+      image: {disposition: migrated_adapted, target: "MedalMapping.source_image and Discuz medal image renderer", reason: "The original image URL is retained and rendered from the Discuz static asset host.", evidence: "script/import_scripts/discuz_x.rb#sync_discuz_medal_definition!; plugins/discourse-discuz-medals"}
+      available: {disposition: migrated_adapted, target: "Discourse Badge.enabled and source award eligibility", reason: "Unavailable medals are disabled and cannot grant active imported badges.", evidence: "script/import_scripts/discuz_x.rb#import_discuz_medals"}
+  bbs.forum_medallog:
+    fields:
+      uid: {disposition: logic_only, target: "Source user join", reason: "Associates award-log dates with source users.", evidence: "script/import_scripts/discuz_x.rb#import_discuz_medals"}
+      medalid: {disposition: logic_only, target: "Source medal join", reason: "Associates award-log dates with imported medal definitions.", evidence: "script/import_scripts/discuz_x.rb#import_discuz_medals"}
+      dateline: {disposition: migrated_adapted, target: "UserBadge.granted_at and Discuz grant source_awarded_at", reason: "Latest qualifying award log time is converted to the badge grant date.", evidence: "script/import_scripts/discuz_x.rb#import_discuz_medals"}
+      type: {disposition: logic_only, target: "Award-log filter", reason: "Only log types 0 and 1 are considered when determining the award date.", evidence: "script/import_scripts/discuz_x.rb#import_discuz_medals"}
+  bbs.forum_groupcreditslog:
+    all_fields:
+      disposition: not_needed
+      target: "No Discourse field"
+      reason: "The user decided not to migrate Discuz circles; this table contains circle credit activity and the circle data was cleared."
+      evidence: "Discuz source table semantics; user decision to exclude circles"
+  bbs.forum_groupfield:
+    all_fields:
+      disposition: not_needed
+      target: "No Discourse field"
+      reason: "The user decided not to migrate Discuz circles; this table stores circle-specific configuration/cache data and the circle data was cleared."
+      evidence: "upload/source/function/function_group.php; user decision to exclude circles"
+  bbs.forum_groupinvite:
+    all_fields:
+      disposition: not_needed
+      target: "No Discourse field"
+      reason: "The user decided not to migrate Discuz circles; circle invitations are not part of the Discourse category model."
+      evidence: "upload/source/module/forum/forum_group.php; user decision to exclude circles"
+  bbs.forum_grouplevel:
+    all_fields:
+      disposition: not_needed
+      target: "No Discourse field"
+      reason: "The user decided not to migrate Discuz circles; circle-specific membership levels and policies are excluded."
+      evidence: "upload/source/class/table/table_forum_grouplevel.php; user decision to exclude circles"
+  bbs.forum_groupranking:
+    all_fields:
+      disposition: not_needed
+      target: "No Discourse field"
+      reason: "The user decided not to migrate Discuz circles; this table stores circle rankings that can be recomputed only inside the discarded feature."
+      evidence: "Discuz source table semantics; user decision to exclude circles"
+  bbs.forum_groupuser:
+    all_fields:
+      disposition: not_needed
+      target: "No Discourse field"
+      reason: "The user decided not to migrate Discuz circles; circle membership and per-circle counters are excluded with the cleared circle data."
+      evidence: "upload/source/function/function_group.php; user decision to exclude circles"
+  bbs.dc_sell_log:
+    fields:
+      id: {disposition: migrated_direct, target: "DiscuzSellPurchase.source_log_id", reason: "Preserves the historical source purchase ID.", evidence: "script/import_scripts/discuz_x.rb#import_discuz_sell_sections"}
+      pid: {disposition: migrated_adapted, target: "Sell section source post ID", reason: "Joins a historical purchase to the parsed source paid section.", evidence: "script/import_scripts/discuz_x.rb#import_discuz_sell_sections"}
+      cid: {disposition: migrated_adapted, target: "Sell section index", reason: "Maps the source section ID to the parser's section index.", evidence: "script/import_scripts/discuz_x.rb#import_discuz_sell_sections"}
+      uid: {disposition: migrated_adapted, target: "DiscuzSellPurchase.discuz_uid and buyer user_id", reason: "Buyer UID is linked to exactly one imported account or placeholder.", evidence: "script/import_scripts/discuz_x.rb#import_discuz_sell_sections"}
+      dateline: {disposition: migrated_adapted, target: "DiscuzSellPurchase.purchased_at", reason: "Source Unix purchase time is retained as an epoch value.", evidence: "script/import_scripts/discuz_x.rb#import_discuz_sell_sections"}
+      pay: {disposition: migrated_direct, target: "DiscuzSellPurchase.paid_amount", reason: "Copies the charged virtual-credit amount.", evidence: "script/import_scripts/discuz_x.rb#import_discuz_sell_sections"}
+      extcredit: {disposition: migrated_direct, target: "DiscuzSellPurchase.credit_id", reason: "Copies the source virtual-credit ID.", evidence: "script/import_scripts/discuz_x.rb#import_discuz_sell_sections"}
+      authorid: {disposition: migrated_adapted, target: "DiscuzSellPurchase.author_uid and validation", reason: "Checked against the paid section author and stored as source author UID.", evidence: "script/import_scripts/discuz_x.rb#import_discuz_sell_sections"}
+      authorincome: {disposition: migrated_direct, target: "DiscuzSellPurchase.author_income", reason: "Copies the seller income recorded for the historical purchase.", evidence: "script/import_scripts/discuz_x.rb#import_discuz_sell_sections"}
+  bbs.common_session:
+    all_fields:
+      disposition: not_needed
+      target: "No Discourse field"
+      reason: "PHP session state is platform-specific and will be invalidated when users move to Discourse; sessions are created by the destination after login."
+      evidence: "Migration authentication design; no importer session-table read"
+  bbs.common_admincp_session:
+    all_fields:
+      disposition: not_needed
+      target: "No Discourse field"
+      reason: "Discuz admin-console session state is platform-specific and must not be reused in Discourse."
+      evidence: "No importer admin-session read"
+  bbs.common_cache:
+    all_fields:
+      disposition: not_needed
+      target: "No Discourse field"
+      reason: "Runtime cache entries are ephemeral and are rebuilt by the destination application."
+      evidence: "No importer cache-table read"
+  bbs.common_syscache:
+    all_fields:
+      disposition: not_needed
+      target: "No Discourse field"
+      reason: "Runtime system cache entries are derived and rebuilt by the destination application."
+      evidence: "No importer cache-table read"
+  bbs.common_process:
+    all_fields:
+      disposition: not_needed
+      target: "No Discourse field"
+      reason: "Runtime process/lock state is ephemeral and has no portable forum content meaning."
+      evidence: "No importer process-table read"
+  bbs.common_searchindex:
+    all_fields:
+      disposition: not_needed
+      target: "No Discourse field"
+      reason: "Search indexes are derived from content and are rebuilt by Discourse after import."
+      evidence: "No importer search-index read"
+  bbs.forum_postcache:
+    all_fields:
+      disposition: not_needed
+      target: "No Discourse field"
+      reason: "Post rendering/cache data is derived from source posts; Discourse cooks and indexes imported content itself."
+      evidence: "No importer post-cache read"
+  bbs.forum_rsscache:
+    all_fields:
+      disposition: not_needed
+      target: "No Discourse field"
+      reason: "RSS cache entries are derived and can be regenerated by the destination."
+      evidence: "No importer RSS-cache read"
+  bbs.forum_spacecache:
+    all_fields:
+      disposition: not_needed
+      target: "No Discourse field"
+      reason: "Forum space cache is derived operational data, not canonical user content."
+      evidence: "No importer space-cache read"
+  ucenter.sqlcache:
+    all_fields:
+      disposition: not_needed
+      target: "No Discourse field"
+      reason: "UCenter SQL cache entries are transient and rebuilt by the destination."
+      evidence: "No importer SQL-cache read"
+
+pending_table_notes:
+  bbs.sinofsx_virtualairline_company: "Required custom feature: virtual-airline company records have no Discourse importer mapping yet; user asked to preserve this capability."
+  bbs.sinofsx_virtualairline_nonaccept: "Required custom feature: virtual-airline exclusion/acceptance records have no Discourse importer mapping yet; user asked to preserve this capability."
+  bbs.forum_activity: "Activity-topic metadata (schedule, place, capacity, fee, eligibility) is not mapped; confirm live usage and decide which event fields must be preserved."
+  bbs.forum_activityapply: "Activity registration records and applicant fields are not mapped; confirm live usage and whether historical registrations must be retained."
+  bbs.forum_thread: "Only topic identity, category, title, display order, poll discriminator, and attachment topic price are mapped; remaining thread state, counters, options, and special types need review."
+  bbs.forum_post: "Only post identity, topic, author, body, timestamp, signature/anonymity, visibility, and first-post state are mapped; remaining post metadata and edit history need review."
+  bbs.forum_forumfield: "Only description, rules, icon, name color, and coarse permission signals are handled; remaining forum settings and permission semantics need review."
+  bbs.forum_access: "Importer only detects that per-user overrides exist; it does not map the individual UID/forum permission rows."
+  bbs.common_member_count: "Virtual-credit fields are mapped for users in the importer reference UID set; verify whether balances for every account, including archived-only accounts, are covered."
+  bbs.common_member_count_archive: "Archived count fields are not used by the current sell-balance importer; confirm whether archived-only balances contain value that must be preserved."
+  bbs.common_member_profile: "Only a selected set of identity/profile fields is mapped; remaining profile fields and privacy/verification behavior need review."
+  bbs.common_member_profile_archive: "Only a selected set of archived profile fields is used as fallback; all other archived profile data remains undecided."
+  bbs.forum_post_history: "Post edit history is not imported; decide whether historical revisions are required in addition to the current and recoverable deleted content."
+  bbs.portal_article_title: "Discuz Portal article content has no importer path yet; decide whether this site uses Portal content that must move."
+  bbs.portal_article_content: "Discuz Portal article bodies have no importer path yet; decide whether this site uses Portal content that must move."
+  bbs.forum_trade: "Discuz marketplace listings are not mapped; assess whether any active or historical trade records need preservation."
+  bbs.forum_tradelog: "Discuz marketplace transactions can contain buyer/seller and payment history; no migration or explicit omission decision is recorded."
+  bbs.jzsjiale_sms_user: "SMS account-to-phone bindings are not migrated; the user allowed dropping SMS login for now but postponed the detailed identity/data decision."
+  bbs.common_member_connect: "Third-party account bindings such as QQ are not migrated; login capability may be dropped, but the detailed binding/data decision remains open."
+  bbs.common_grouppm: "Group-message data is not included in the current private-message importer; decide whether it represents user messages that must be preserved."
+  bbs.common_member_grouppm: "Per-user group-message state is not included in the current private-message importer; decide whether any of it must be preserved."
+
+  extend_flydata.common_cert: "Custom callsign/certificate records have no Discourse importer mapping yet. The password field metadata and values were excluded from the approved snapshot; its migration/security decision remains open."
+  extend_flydata.common_userinfo: "Virtual-airline member, callsign, company, and activity data are not imported yet; the user requires the virtual-airline capability to be preserved."
+  extend_flydata.customprefix: "Virtual-airline callsign-prefix configuration has no Discourse mapping yet; required for preserving customized callsigns."
+  extend_flydata.echo_stat: "Aggregated plugin statistics have no migration path; decide whether to recompute them from migrated records or preserve a snapshot."
+  extend_flydata.exam_pilotkeys: "Custom exam question bank has no Discourse mapping yet; the user requested porting the current exam capability."
+  extend_flydata.exam_pilotresult: "Per-user exam results and progress have no Discourse mapping yet; determine which state/history the exam plugin must retain."
+  extend_flydata.imp_aip_content: "Custom AIP content and hierarchy have no Discourse importer mapping; decide whether these documents are in migration scope."
+  extend_flydata.imp_aip_version: "Custom AIP version/effective-date metadata has no Discourse importer mapping; preserve if the related AIP content is retained."
+  extend_flydata.imp_anniversary: "Anniversary event registrations contain participant/contact fields and have no import path; decide whether historical registrations must move."
+  extend_flydata.imp_anniversary_10th: "10th-anniversary event registrations have no import path; decide whether this historical event data must move."
+  extend_flydata.imp_anniversary_schedule: "Anniversary schedule/attendance records have no import path; decide whether historical attendance must move."
+  extend_flydata.imp_anniversary_schedule_10th: "10th-anniversary schedule/attendance records have no import path; decide whether historical attendance must move."
+  extend_flydata.imp_ban: "Custom plugin ban records have no Discourse moderation mapping; define equivalence and retention before classifying as unnecessary."
+  extend_flydata.imp_dispatch: "Virtual-airline dispatch assignments have no Discourse importer mapping yet; preserve if dispatch operations are in scope."
+  extend_flydata.imp_dispatch_route: "Virtual-airline dispatch routes have no Discourse importer mapping yet; preserve if dispatch operations are in scope."
+  extend_flydata.imp_dispatch_schedule: "Virtual-airline dispatch schedules have no Discourse importer mapping yet; preserve if dispatch operations are in scope."
+  extend_flydata.imp_examine: "Custom controller/pilot examination records have no Discourse importer mapping yet; determine required history for the ported exam capability."
+  extend_flydata.imp_log: "Custom plugin operation logs are not imported; retention, audit, and privacy requirements have not been decided."
+  extend_flydata.imp_news: "Custom plugin news content has no Discourse mapping yet; decide whether it should become categories/topics or be archived elsewhere."
+  extend_flydata.imp_news_read: "Per-user plugin news read state has no Discourse mapping; decide whether this state is needed after news migration."
+  extend_flydata.imp_recruit: "Virtual-airline recruitment campaigns have no Discourse importer mapping yet; preserve if recruitment workflows are in scope."
+  extend_flydata.imp_recruit_condition: "Recruitment eligibility conditions have no Discourse importer mapping yet; preserve with the associated campaign if required."
+  extend_flydata.imp_recruit_seat: "Recruitment position/seat requirements have no Discourse importer mapping yet; preserve with the associated campaign if required."
+  extend_flydata.imp_training: "Custom virtual-airline training records have no Discourse importer mapping yet; decide which history and comments must be retained."
+  extend_flydata.memberprefixlog: "Historical callsign-prefix changes are not imported; decide whether this audit history is required by the virtual-airline feature."
+
+patterns:
+  - database: ucenter
+    table_regex: "^pm_messages_[0-9]$"
+    fields:
+      pmid: {disposition: migrated_adapted, target: "Post import_id for private-message posts", reason: "Message ID is namespaced as pm:<pmid> to avoid collision with public posts.", evidence: "script/import_scripts/discuz_x.rb#import_private_messages"}
+      plid: {disposition: migrated_adapted, target: "Private-message Topic identity", reason: "Message list ID groups the imported messages into one Discourse PM topic.", evidence: "script/import_scripts/discuz_x.rb#import_private_messages"}
+      authorid: {disposition: migrated_adapted, target: "Post.user_id and PM participant set", reason: "Source author UID resolves to an imported account; unmapped authors cause the PM thread to be skipped.", evidence: "script/import_scripts/discuz_x.rb#import_private_messages"}
+      message: {disposition: migrated_adapted, target: "Private-message Post.raw/cooked", reason: "Discuz message markup passes through the same BBCode conversion pipeline as public posts.", evidence: "script/import_scripts/discuz_x.rb#import_private_messages, #process_discuzx_post"}
+      dateline: {disposition: migrated_adapted, target: "Private-message Post.created_at", reason: "Unix timestamp is converted to a Discourse time value.", evidence: "script/import_scripts/discuz_x.rb#import_private_messages"}
+  - database: ucenter
+    table_regex: "^pm_lists$"
+    fields:
+      plid: {disposition: logic_only, target: "PM thread join key", reason: "Loads thread metadata for messages sharing this list ID.", evidence: "script/import_scripts/discuz_x.rb#import_private_messages"}
+      subject: {disposition: migrated_direct, target: "Private-message Topic.title", reason: "Copies the source conversation subject.", evidence: "script/import_scripts/discuz_x.rb#import_private_messages"}
+      pmtype: {disposition: migrated_adapted, target: "Private-message recipient construction", reason: "Selects direct-message participant parsing behavior.", evidence: "script/import_scripts/discuz_x.rb#import_private_messages"}
+      min_max: {disposition: migrated_adapted, target: "Private-message direct participants", reason: "Direct-message UIDs are decoded from the min_max pair; separate per-message read/delete/recall state is not migrated.", evidence: "script/import_scripts/discuz_x.rb#import_private_messages"}
+  - database: ucenter
+    table_regex: "^pm_members$"
+    fields:
+      plid: {disposition: logic_only, target: "PM thread join key", reason: "Loads the member list for a private-message conversation.", evidence: "script/import_scripts/discuz_x.rb#import_private_messages"}
+      uid: {disposition: migrated_adapted, target: "Discourse PM participants", reason: "Source UIDs are resolved to imported Discourse usernames.", evidence: "script/import_scripts/discuz_x.rb#import_private_messages"}
+  - database: ucenter
+    table_regex: "^members$"
+    fields:
+      uid: {disposition: logic_only, target: "Placeholder-account join key", reason: "Loads legacy account data only for UIDs referenced outside the source member table.", evidence: "script/import_scripts/discuz_x.rb#import_unrepresented_users"}
+      username: {disposition: migrated_adapted, target: "Inactive placeholder User.username and User.name", reason: "Used only for referenced UIDs without a BBS member row; uniqueness/validation applies.", evidence: "script/import_scripts/discuz_x.rb#import_unrepresented_users"}
+      email: {disposition: migrated_adapted, target: "Reserved placeholder email", reason: "Original UCenter email is not exposed as a confirmed address for an account lacking a BBS member row.", evidence: "script/import_scripts/discuz_x.rb#import_unrepresented_users"}
+      regdate: {disposition: migrated_adapted, target: "Placeholder User.created_at", reason: "Unix timestamp is converted to a Discourse time value.", evidence: "script/import_scripts/discuz_x.rb#import_unrepresented_users"}
+      password: {disposition: migrated_adapted, target: "UserCustomField discuz_password_hash for placeholder identity", reason: "Stored only for legacy-auth compatibility and never copied as a Discourse password hash.", evidence: "script/import_scripts/discuz_x.rb#import_unrepresented_users, #create_user"}
+      salt: {disposition: migrated_adapted, target: "UserCustomField discuz_password_salt for placeholder identity", reason: "Stored with the source hash for legacy-auth compatibility.", evidence: "script/import_scripts/discuz_x.rb#import_unrepresented_users, #create_user"}
+  - database: bbs
+    table_regex: "^forum_attachment_[0-9]+$"
+    fields:
+      aid: {disposition: migrated_adapted, target: "discourse_discuz_bbcode.discuz_attachments.aid", reason: "Retains the source attachment identity.", evidence: "script/import_scripts/discuz_x.rb#import_attachment_metadata"}
+      pid: {disposition: migrated_adapted, target: "discuz_attachments.discuz_pid and post_id", reason: "Maps source post relation to the imported Discourse post.", evidence: "script/import_scripts/discuz_x.rb#import_attachment_metadata"}
+      tid: {disposition: migrated_adapted, target: "discuz_attachments.discuz_tid", reason: "Retains the source thread relation.", evidence: "script/import_scripts/discuz_x.rb#import_attachment_metadata"}
+      uid: {disposition: migrated_adapted, target: "discuz_attachments.discuz_uid and user_id", reason: "Retains source UID and resolves the corresponding imported user when present.", evidence: "script/import_scripts/discuz_x.rb#import_attachment_metadata"}
+      dateline: {disposition: migrated_adapted, target: "discuz_attachments.uploaded_at", reason: "Retains the source attachment epoch.", evidence: "script/import_scripts/discuz_x.rb#import_attachment_metadata"}
+      filename: {disposition: migrated_direct, target: "discuz_attachments.filename", reason: "Copies the display filename.", evidence: "script/import_scripts/discuz_x.rb#import_attachment_metadata"}
+      attachment: {disposition: migrated_adapted, target: "discuz_attachments.object_key", reason: "Stored as the validated COS/object path; file bytes are not copied in metadata-only migration.", evidence: "script/import_scripts/discuz_x.rb#import_attachment_metadata"}
+      filesize: {disposition: migrated_direct, target: "discuz_attachments.filesize", reason: "Copies source metadata size.", evidence: "script/import_scripts/discuz_x.rb#import_attachment_metadata"}
+      remote: {disposition: migrated_direct, target: "discuz_attachments.is_remote", reason: "Copies the source remote-storage flag.", evidence: "script/import_scripts/discuz_x.rb#import_attachment_metadata"}
+      isimage: {disposition: migrated_direct, target: "discuz_attachments.is_image", reason: "Copies the source image flag.", evidence: "script/import_scripts/discuz_x.rb#import_attachment_metadata"}
+      thumb: {disposition: migrated_direct, target: "discuz_attachments.has_thumbnail", reason: "Copies whether a thumbnail exists.", evidence: "script/import_scripts/discuz_x.rb#import_attachment_metadata"}
+      readperm: {disposition: migrated_direct, target: "discuz_attachments.readperm", reason: "Copies the source attachment read-permission value for plugin checks.", evidence: "script/import_scripts/discuz_x.rb#import_attachment_metadata"}
+      price: {disposition: migrated_direct, target: "discuz_attachments.attachment_price", reason: "Copies the source attachment price for paid-attachment handling.", evidence: "script/import_scripts/discuz_x.rb#import_attachment_metadata"}
